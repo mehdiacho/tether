@@ -96,16 +96,6 @@ jobs:
           echo "Now at $v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - name: Commit the bump and tag it
-        run: |
-          set -euo pipefail
-          git config user.name  'mehdiacho'
-          git config user.email 'mehdiacho@gmail.com'
-          git add package.json package-lock.json
-          git commit -m "Release v${{ steps.ver.outputs.version }}"
-          git tag "v${{ steps.ver.outputs.version }}"
-          git push origin main --follow-tags
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -161,6 +151,22 @@ jobs:
 
           echo "path=$out" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Deliberately after the build. Tagging first means a failed compile
+      # leaves a version tag pointing at a release that does not exist, and
+      # the next run then has to work around it.
+      - name: Commit the bump and tag it
+        run: |
+          set -euo pipefail
+          git config user.name  'mehdiacho'
+          git config user.email 'mehdiacho@gmail.com'
+          git add package.json package-lock.json
+          git commit -m "Release v${{ steps.ver.outputs.version }}"
+          # Annotated, not lightweight: `--follow-tags` pushes annotated tags only,
+          # so a lightweight one goes green here and silently never reaches the
+          # remote — which then fails much later, at release creation.
+          git tag -a "v${{ steps.ver.outputs.version }}" -m "v${{ steps.ver.outputs.version }}"
+          git push origin main --follow-tags
 
       - name: Publish the release
         env:
