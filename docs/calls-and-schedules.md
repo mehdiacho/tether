@@ -95,7 +95,7 @@ returned stream doesn't match (different rate, stereo, an ID3 header), the lead-
 warning** rather than spliced — a slightly clipped message is a much better failure than a corrupted
 one.
 
-The same technique is in `X:\ai.tools\tools\say.ps1` (`-LeadInMs`, default 700), so the standalone
+The same technique is used by the standalone `say.ps1` helper (`-LeadInMs`, default 700), so the standalone
 speech tool behaves identically.
 
 ---
