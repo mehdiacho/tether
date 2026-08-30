@@ -1,5 +1,9 @@
 node_modules/
-data/
+
+# Anchored with a leading slash on purpose. A bare `data/` also matches
+# android/app/src/main/java/.../data/, which silently kept the app's entire
+# data layer out of the repo until CI failed to compile.
+/data/
 .env
 .mcp.json
 *.log
@@ -16,10 +20,10 @@ android/app/release/
 
 # A copy of the live database. Contains device push tokens and pairing state,
 # so this is a credential leak, not just noise.
-data.bak/
+/data.bak/
 
 # Host-side mount for the Firebase service-account key (see docker-compose.yml).
-secrets/
+/secrets/
 
 # Build outputs. Releases carry the APK; the repo should not.
 *.apk
