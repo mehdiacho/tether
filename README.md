@@ -338,7 +338,7 @@ different key — so it is backed up outside CI as well.
 | 5d | User-initiated calls (call the agent) | |
 | 6 | Session registry — live Claude Code sessions and subagents, and a relay that carries a reply back into one | **done** |
 
-See `X:\ai.tools\docs\agent-relay-design.md` for the full design rationale, including why the OTP
+See [`docs/sessions-and-agents.md`](docs/sessions-and-agents.md) for how sessions and agents work, including why the OTP
 feature needs a mandatory confirmation step.
 
 ## License

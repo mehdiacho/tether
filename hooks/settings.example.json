@@ -12,49 +12,49 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ],
     "Notification": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ],
     "SubagentStart": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ],
     "SubagentStop": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+          { "type": "command", "command": "node /absolute/path/to/tether/hooks/tether-hook.mjs", "timeout": 6 }
         ]
       }
     ]
