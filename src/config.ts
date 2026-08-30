@@ -47,6 +47,15 @@ export const config = {
   port: int('PORT', 8790),
   /** How clients reach this server. Used to build tappable action URLs. */
   publicUrl: optional('PUBLIC_URL', '').replace(/\/$/, ''),
+
+  /**
+   * What to call this server on the phone.
+   *
+   * Cosmetic, but it earns its keep once a server has several addresses: the
+   * settings screen can then say "NAS" with the addresses underneath, instead
+   * of making an IP stand in for an identity.
+   */
+  serverName: optional('SERVER_NAME', 'Tether'),
   dbPath: optional('DB_PATH', './data/tether.db'),
 
   /** Tokens that may CREATE requests (agents). */

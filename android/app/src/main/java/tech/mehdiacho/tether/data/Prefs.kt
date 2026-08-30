@@ -2,6 +2,7 @@ package tech.mehdiacho.tether.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import org.json.JSONArray
 
 /**
  * Everything the app needs to keep between launches: where the server is, and
@@ -13,15 +14,94 @@ import android.content.SharedPreferences
  * a dependency that has repeatedly broken across Android versions. The
  * meaningful protection is that the token is device-scoped and revocable
  * server-side, which is a property of the design rather than of the file.
+ *
+ * ## One server, several addresses
+ *
+ * A server is not an address. The same machine is `192.168.0.2` from the sofa
+ * and `100.79.15.57` over the tunnel, and the token is valid at both because it
+ * authenticates the *device*, not the route. Storing a single address made the
+ * app unusable the moment the network changed, which is precisely when a tool
+ * for reaching a stuck agent matters most.
+ *
+ * So [addresses] is an ordered list and the head is whichever one last worked.
+ * [promote] moves a working address to the front, so the app converges on the
+ * right route on its own rather than paying the failover cost on every request.
  */
 class Prefs(context: Context) {
 
     private val sp: SharedPreferences =
         context.applicationContext.getSharedPreferences("tether", Context.MODE_PRIVATE)
 
+    /** A human label, so the settings screen says "NAS" rather than an IP. */
+    var serverName: String
+        get() = sp.getString(KEY_NAME, "") ?: ""
+        set(value) = sp.edit().putString(KEY_NAME, value.trim()).apply()
+
+    /**
+     * Every address known to reach this server, best first.
+     *
+     * Reading migrates a pre-0.2 install, which stored one address under a
+     * different key. Doing it on read rather than in an init block means an
+     * upgrade needs no migration step and cannot half-run.
+     */
+    var addresses: List<String>
+        get() {
+            val raw = sp.getString(KEY_ADDRESSES, null)
+            if (raw.isNullOrBlank()) {
+                val legacy = sp.getString(KEY_SERVER, "")?.trimEnd('/').orEmpty()
+                return if (legacy.isBlank()) emptyList() else listOf(legacy)
+            }
+            return runCatching {
+                val arr = JSONArray(raw)
+                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
+            }.getOrDefault(emptyList())
+        }
+        set(value) {
+            val clean = value.map { normalize(it) }.filter { it.isNotBlank() }.distinct()
+            val arr = JSONArray().apply { clean.forEach { put(it) } }
+            sp.edit()
+                .putString(KEY_ADDRESSES, arr.toString())
+                // Kept in step so anything still reading the old key — and any
+                // older build the user rolls back to — still finds an address.
+                .putString(KEY_SERVER, clean.firstOrNull().orEmpty())
+                .apply()
+        }
+
+    /** The address currently in use: the head of the list. */
     var serverUrl: String
-        get() = sp.getString(KEY_SERVER, "") ?: ""
-        set(value) = sp.edit().putString(KEY_SERVER, value.trimEnd('/')).apply()
+        get() = addresses.firstOrNull().orEmpty()
+        set(value) = promote(value)
+
+    /** Move an address to the front, adding it if it is new. */
+    fun promote(address: String) {
+        val clean = normalize(address)
+        if (clean.isBlank()) return
+        addresses = listOf(clean) + addresses.filterNot { it.equals(clean, ignoreCase = true) }
+    }
+
+    /** Add an address at the end. Returns false if it was already known. */
+    fun addAddress(address: String): Boolean {
+        val clean = normalize(address)
+        if (clean.isBlank()) return false
+        val current = addresses
+        if (current.any { it.equals(clean, ignoreCase = true) }) return false
+        addresses = current + clean
+        return true
+    }
+
+    /**
+     * Forget an address. Refuses to remove the last one, because a paired
+     * server with no route is indistinguishable from being unpaired but far
+     * more confusing — the token is still there and nothing says why it fails.
+     */
+    fun removeAddress(address: String): Boolean {
+        val current = addresses
+        if (current.size <= 1) return false
+        val next = current.filterNot { it.equals(normalize(address), ignoreCase = true) }
+        if (next.size == current.size) return false
+        addresses = next
+        return true
+    }
 
     var clientToken: String
         get() = sp.getString(KEY_TOKEN, "") ?: ""
@@ -43,16 +123,29 @@ class Prefs(context: Context) {
         set(value) = sp.edit().putString(KEY_PUSH, value).apply()
 
     val isPaired: Boolean
-        get() = serverUrl.isNotBlank() && clientToken.isNotBlank()
+        get() = addresses.isNotEmpty() && clientToken.isNotBlank()
 
     fun clear() {
         sp.edit().clear().apply()
     }
 
     private companion object {
-        const val KEY_SERVER = "server_url"
+        const val KEY_SERVER = "server_url"        // pre-0.2, single address
+        const val KEY_ADDRESSES = "server_addresses"
+        const val KEY_NAME = "server_name"
         const val KEY_TOKEN = "client_token"
         const val KEY_DEVICE = "device_id"
         const val KEY_PUSH = "reported_push_token"
+
+        /**
+         * A bare host is the overwhelmingly common thing to type, and rejecting
+         * it teaches nothing. Assume http, since this is a LAN or tunnel address
+         * far more often than a public HTTPS one.
+         */
+        fun normalize(raw: String): String {
+            val t = raw.trim().trimEnd('/')
+            if (t.isBlank()) return ""
+            return if (t.startsWith("http://") || t.startsWith("https://")) t else "http://$t"
+        }
     }
 }

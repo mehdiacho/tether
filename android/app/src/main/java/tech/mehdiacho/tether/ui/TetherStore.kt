@@ -37,6 +37,30 @@ class TetherStore(context: Context) {
     var serverUrl by mutableStateOf(prefs.serverUrl)
         private set
 
+    /** What this server is called. Cosmetic; the addresses do the work. */
+    var serverName by mutableStateOf(prefs.serverName)
+        private set
+
+    /** Every address known to reach the server, in the order they are tried. */
+    var addresses by mutableStateOf(prefs.addresses)
+        private set
+
+    /**
+     * Addresses the server reports that this device has not been told about.
+     *
+     * Offered rather than added silently. The server's own list includes every
+     * interface it can see, and some of those — a docker bridge, a second NIC
+     * on a network the phone will never be on — are dead ends that would cost a
+     * real timeout on every failover. Suggesting them keeps the discovery and
+     * leaves the judgement with the person who knows the network.
+     */
+    var suggestedAddresses by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    /** Result of the last address test, keyed by address. */
+    var addressChecks by mutableStateOf<Map<String, AddressCheck>>(emptyMap())
+        private set
+
     var requests by mutableStateOf<List<TetherRequest>>(emptyList())
         private set
     var calls by mutableStateOf<List<CallSession>>(emptyList())
@@ -86,7 +110,7 @@ class TetherStore(context: Context) {
         return result.fold(
             onSuccess = {
                 paired = true
-                serverUrl = prefs.serverUrl
+                syncServer()
                 pushReady = token != null
                 if (token == null) {
                     error = "Paired, but this device has no push token — " +
@@ -105,12 +129,101 @@ class TetherStore(context: Context) {
         client.unpair()
         paired = false
         serverUrl = ""
+        serverName = ""
+        addresses = emptyList()
+        suggestedAddresses = emptyList()
+        addressChecks = emptyMap()
         requests = emptyList()
         calls = emptyList()
         sessions = emptyList()
         openSession = null
         openMessages = emptyList()
         pushReady = false
+    }
+
+    /* ------------------------------------------------------------- server -- */
+
+    /**
+     * Pull the stored server details back into UI state.
+     *
+     * Called after anything that can reorder the list — including a successful
+     * failover deep inside the client, which promotes whichever address worked.
+     * Without this the settings screen would keep showing an order the app
+     * stopped using.
+     */
+    private fun syncServer() {
+        serverUrl = prefs.serverUrl
+        serverName = prefs.serverName
+        addresses = prefs.addresses
+        suggestedAddresses = suggestedAddresses.filterNot { known -> known in addresses }
+    }
+
+    /**
+     * Ask the server who it is and where else it lives.
+     *
+     * Silent on failure. This runs on every refresh, it is pure enrichment, and
+     * a server too old to have the endpoint returns a 404 that says nothing
+     * about whether the app is working.
+     */
+    suspend fun refreshServerInfo() {
+        if (!paired) return
+        withContext(Dispatchers.IO) { client.serverInfo() }.onSuccess { info ->
+            if (info.name.isNotBlank() && prefs.serverName.isBlank()) {
+                prefs.serverName = info.name
+            }
+            suggestedAddresses = info.addresses.filterNot { it in prefs.addresses }
+            syncServer()
+        }
+    }
+
+    fun renameServer(name: String) {
+        prefs.serverName = name
+        serverName = prefs.serverName
+    }
+
+    /**
+     * Add an address by hand.
+     *
+     * Returns null on success, or why it was refused — the two refusals being a
+     * blank entry and one already in the list, both of which are worth saying
+     * out loud rather than swallowing as a no-op button.
+     */
+    fun addAddress(raw: String): String? {
+        if (raw.isBlank()) return "Enter an address first."
+        if (!prefs.addAddress(raw)) return "That address is already in the list."
+        syncServer()
+        return null
+    }
+
+    fun removeAddress(address: String): String? {
+        if (!prefs.removeAddress(address)) {
+            return "That is the only address left — the app would have no way to reach the server."
+        }
+        addressChecks = addressChecks - address
+        syncServer()
+        return null
+    }
+
+    /** Move an address to the front, so it is the one tried first. */
+    fun makePrimary(address: String) {
+        prefs.promote(address)
+        syncServer()
+    }
+
+    /**
+     * Try one address and remember what happened.
+     *
+     * Deliberately does not fail over: the question being asked is whether this
+     * address works, and quietly answering it with a different one that does
+     * would be worse than useless.
+     */
+    suspend fun testAddress(address: String) {
+        addressChecks = addressChecks + (address to AddressCheck.Checking)
+        val result = withContext(Dispatchers.IO) { client.testAddress(address) }
+        addressChecks = addressChecks + (address to result.fold(
+            onSuccess = { AddressCheck.Reachable },
+            onFailure = { AddressCheck.Unreachable(friendly(it)) },
+        ))
     }
 
     /**
@@ -146,6 +259,11 @@ class TetherStore(context: Context) {
         // older server has no /api/sessions at all, and a 404 for a feature it
         // does not have must not blank out the messages that did arrive.
         withContext(Dispatchers.IO) { client.listSessions() }.onSuccess { sessions = it }
+
+        // Those calls may have failed over, which reorders the address list.
+        // Pick that up so settings reflects the address actually in use.
+        refreshServerInfo()
+        syncServer()
 
         // Keep an open session's header in step with the list it came from,
         // so a session that ends while being read stops offering a composer.
@@ -257,4 +375,16 @@ class TetherStore(context: Context) {
 
         else -> t.message ?: "Could not reach the server"
     }
+}
+
+/** What testing one address turned up. */
+sealed interface AddressCheck {
+    data object Checking : AddressCheck
+    data object Reachable : AddressCheck
+
+    /**
+     * Carries the reason, because "unreachable" alone sends you to the wrong
+     * place: a wrong port and an unauthorised token look identical without it.
+     */
+    data class Unreachable(val reason: String) : AddressCheck
 }

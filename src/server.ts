@@ -191,6 +191,23 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
 
   const requireClient = requireClientAuth;
 
+  /**
+   * Who this server is, and every address it can be reached at.
+   *
+   * A paired device is authenticated by its token, not by the route it arrived
+   * on, so the same server is legitimately `192.168.0.2` from the sofa and a
+   * tunnel address from anywhere else. The phone cannot work that out alone —
+   * but this server can, because `candidateAddresses` includes the Host header
+   * of this very request. So a device paired at home learns its away-from-home
+   * address just by opening the app once while away.
+   *
+   * Client-authenticated: the address list is a small map of where this machine
+   * lives, and there is no reason to hand it to an unauthenticated caller.
+   */
+  app.get('/api/server', requireClient, (req, res) => {
+    res.json({ name: config.serverName, addresses: candidateAddresses(req) });
+  });
+
   app.get('/api/requests', requireClient, (req, res) => {
     const all = req.query['all'] === '1';
     res.json({ requests: all ? requests.listRecent(100) : requests.listPending() });
