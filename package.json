@@ -1,6 +1,6 @@
 {
   "name": "tether-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Human-in-the-loop layer for AI agents: notify, ask, and wait for an answer.",
   "type": "module",
