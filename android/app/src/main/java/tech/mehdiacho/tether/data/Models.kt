@@ -297,6 +297,26 @@ data class SessionMessage(
     }
 }
 
+/**
+ * What a server says about itself.
+ *
+ * [addresses] is the server's own view of where it can be reached, which is
+ * strictly better information than the phone has: it includes the address this
+ * request arrived on, so a device that pairs at home discovers its away-from-
+ * home route simply by being opened once while away.
+ */
+data class ServerInfo(
+    val name: String,
+    val addresses: List<String>,
+) {
+    companion object {
+        fun from(o: JSONObject) = ServerInfo(
+            name = o.optString("name"),
+            addresses = o.optJSONArray("addresses").toStringList(),
+        )
+    }
+}
+
 /* ------------------------------------------------------------------ json -- */
 
 fun JSONArray?.toStringList(): List<String> {

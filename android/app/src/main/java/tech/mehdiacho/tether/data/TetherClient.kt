@@ -2,6 +2,7 @@ package tech.mehdiacho.tether.data
 
 import android.content.Context
 import android.util.Base64
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -39,6 +40,18 @@ class TetherClient(context: Context) {
         .retryOnConnectionFailure(true)
         .build()
 
+    /**
+     * A shorter connect timeout for every address after the first.
+     *
+     * Ten seconds spent on a dead address is an eternity when the phone is
+     * ringing. Anything actually reachable completes a TCP handshake in well
+     * under three seconds on both a LAN and a tunnel, so an attempt still
+     * connecting after that is almost certainly on the wrong network.
+     */
+    private val failoverHttp = http.newBuilder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .build()
+
     val baseUrl: String get() = prefs.serverUrl
     val isPaired: Boolean get() = prefs.isPaired
 
@@ -52,15 +65,74 @@ class TetherClient(context: Context) {
     private fun json(body: JSONObject) =
         body.toString().toRequestBody(JSON_MEDIA)
 
-    private fun <T> execute(request: Request, parse: (Response) -> T): Result<T> =
+    /**
+     * Run a request against exactly one address, with no failover.
+     *
+     * Pairing uses this: there is one address, the user just typed it, and
+     * quietly succeeding against a different server would be a confusing
+     * outcome to debug.
+     */
+    private fun <T> executeOnce(
+        request: Request,
+        client: OkHttpClient = http,
+        parse: (Response) -> T,
+    ): Result<T> =
         runCatching {
-            http.newCall(request).execute().use { res ->
+            client.newCall(request).execute().use { res ->
                 if (!res.isSuccessful) {
                     throw HttpError(res.code, res.body?.string().orEmpty())
                 }
                 parse(res)
             }
         }
+
+    /**
+     * Run a request, trying each known address until one answers.
+     *
+     * The distinction that makes this safe is between *not reaching* a server
+     * and *being told no by one*. An IOException means this address is wrong for
+     * the current network — the phone left the house, the tunnel is up instead
+     * of the LAN — so the next address is worth trying. An [HttpError] means a
+     * server answered, and it is this server: retrying a 409 "someone else
+     * already answered that call" against a second address would answer the
+     * call twice.
+     *
+     * A working address is promoted to the head of the list, so the cost of
+     * being on the wrong network is paid once per network change rather than
+     * once per request.
+     */
+    private fun <T> execute(request: Request, parse: (Response) -> T): Result<T> {
+        val bases = prefs.addresses
+        if (bases.size <= 1) return executeOnce(request, parse = parse)
+
+        var last: Throwable? = null
+        for ((index, base) in bases.withIndex()) {
+            val client = if (index == 0) http else failoverHttp
+            val result = executeOnce(rebase(request, base), client, parse)
+            if (result.isSuccess) {
+                if (index != 0) prefs.promote(base)
+                return result
+            }
+            val failure = result.exceptionOrNull()
+            if (failure is HttpError) return result
+            last = failure
+        }
+        return Result.failure(last ?: IOException("no server address is configured"))
+    }
+
+    /**
+     * Point a request at a different address, keeping its path, query and body.
+     *
+     * Rebuilt from the parsed URL rather than spliced from strings, so an
+     * already-encoded path survives untouched — call and audio IDs are opaque
+     * and a second encoding pass would quietly corrupt them.
+     */
+    private fun rebase(request: Request, base: String): Request {
+        val old = request.url
+        val target = (base + old.encodedPath).toHttpUrlOrNull() ?: return request
+        val rebuilt = target.newBuilder().encodedQuery(old.encodedQuery).build()
+        return request.newBuilder().url(rebuilt).build()
+    }
 
     private fun bodyJson(res: Response): JSONObject =
         JSONObject(res.body?.string().orEmpty().ifBlank { "{}" })
@@ -86,8 +158,9 @@ class TetherClient(context: Context) {
             .post(json(payload))
             .build()
 
-        return execute(request, ::bodyJson).map { o ->
-            prefs.serverUrl = clean
+        // executeOnce, not execute: pairing must hit the address the user gave.
+        return executeOnce(request, parse = ::bodyJson).map { o ->
+            prefs.addresses = listOf(clean)
             prefs.clientToken = o.optString("clientToken")
             prefs.deviceId = o.optString("deviceId")
             prefs.reportedPushToken = pushToken.orEmpty()
@@ -95,6 +168,37 @@ class TetherClient(context: Context) {
     }
 
     fun unpair() = prefs.clear()
+
+    /**
+     * Ask the server what it calls itself, and every address it believes it can
+     * be reached at.
+     *
+     * The interesting one is the address this very request arrived on, which the
+     * server reads off the Host header. That is how a device paired on the LAN
+     * learns its tunnel address without anyone typing it: pair at home, open the
+     * app once over the tunnel, and the second route is now known.
+     */
+    fun serverInfo(): Result<ServerInfo> {
+        val request = authed("/api/server").get().build()
+        return execute(request, ::bodyJson).map(ServerInfo::from)
+    }
+
+    /**
+     * Check one specific address, ignoring the list.
+     *
+     * Backs the "test" button in settings, where the whole question is whether
+     * *this* address works — failing over to a working one would answer a
+     * different question and look like a pass.
+     */
+    fun testAddress(address: String): Result<ServerInfo> {
+        val clean = address.trim().trimEnd('/')
+        val request = Request.Builder()
+            .url("$clean/api/server")
+            .header("Authorization", "Bearer ${prefs.clientToken}")
+            .get()
+            .build()
+        return executeOnce(request, failoverHttp, ::bodyJson).map(ServerInfo::from)
+    }
 
     /**
      * Tell the server this device's current FCM token.
@@ -230,18 +334,22 @@ class TetherClient(context: Context) {
      * carries the request's single-purpose action token, and needs no header.
      * Every turn after it is an ordinary API path that does need one.
      *
-     * The credential is attached on exactly one condition: the URL is on the
-     * server this device is paired to. A URL that arrived over push pointing
-     * anywhere else gets no header, because that would be handing the device
-     * token to whoever wrote the payload.
+     * The credential is attached on exactly one condition: the URL is on a
+     * server this device is paired to. That test spans every known address,
+     * because a push sent while the phone was at home carries a LAN URL that is
+     * still perfectly ours when the phone answers over the tunnel — and it is
+     * then rebased onto whichever address actually reaches it.
+     *
+     * A URL pointing anywhere else gets no header and no failover, because that
+     * would be handing the device token to whoever wrote the payload.
      */
     fun fetchAudio(audioUrl: String): Result<ByteArray> {
-        val ours = prefs.serverUrl.isNotBlank() && audioUrl.startsWith(prefs.serverUrl)
-        val request =
-            if (ours) Request.Builder().url(audioUrl)
-                .header("Authorization", "Bearer ${prefs.clientToken}").get().build()
-            else Request.Builder().url(audioUrl).get().build()
-        return execute(request) { it.body?.bytes() ?: ByteArray(0) }
+        val ours = prefs.addresses.any { audioUrl.startsWith(it, ignoreCase = true) }
+        val builder = Request.Builder().url(audioUrl)
+        if (ours) builder.header("Authorization", "Bearer ${prefs.clientToken}")
+        val request = builder.get().build()
+        val body = { res: Response -> res.body?.bytes() ?: ByteArray(0) }
+        return if (ours) execute(request, body) else executeOnce(request, parse = body)
     }
 
     class HttpError(val code: Int, val body: String) :

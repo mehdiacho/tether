@@ -143,6 +143,7 @@ notification channel. Skip it unless you want off-LAN delivery before you've sor
 | Route | Auth | Purpose |
 |---|---|---|
 | `ALL /mcp` | agent | Streamable HTTP MCP endpoint |
+| `GET /api/server` | client | This server's name and every address it can be reached at, including the one this request arrived on |
 | `GET /api/requests` | client | Pending list (`?all=1` for history) |
 | `POST /api/requests/:id/answer` | client | `{"answer":"..."}` or `{"refused":true}` |
 | `GET /api/stream?token=` | client | WebSocket: live feed, sends the backlog on connect |
@@ -241,6 +242,32 @@ Two things must be true for the phone to actually ring, and the app says so on s
 - The app holds `USE_FULL_SCREEN_INTENT`. Android 14 auto-grants this only to apps Play classifies as
   calling or alarm apps; until Tether is published in that category it has to be granted by hand, and
   without it a call arrives as a card in the shade instead of a ringing screen.
+
+### One server, several addresses
+
+A device is authenticated by its token, not by the route it arrived on. The same server is
+`192.168.0.2` from the sofa and a tailnet address from a cafe, and it will happily answer both --
+so an app that stored a single address was stranded the moment the network changed, which is
+exactly when a tool for reaching a stuck agent matters most.
+
+So the app keeps a **named server with an ordered list of addresses**. Settings lets you rename it,
+add an address, remove one, or promote one, at any time after pairing -- no re-pairing involved.
+
+- Requests try each address from the top until one answers, and whichever works is promoted to the
+  top. The cost of being on the wrong network is paid once per network change, not once per request.
+- Failover happens **only** on a transport error. An HTTP status means a server answered, and it is
+  this server: retrying a `409 someone else already answered that call` against a second address
+  would answer the call twice.
+- Every address after the first gets a 3-second connect timeout rather than 10. Anything reachable
+  completes a handshake well inside that, and ten seconds per dead address is an eternity when the
+  phone is ringing.
+- `GET /api/server` returns the server's name and every address it can see -- including the one the
+  request arrived on, read off the `Host` header. That is how a phone paired at home discovers its
+  away-from-home address: open the app once while away and it is offered as a suggestion.
+
+Suggestions are offered rather than added silently, because the server's list includes every
+interface it has, and a docker bridge or a second NIC the phone will never reach is a dead end that
+would cost a real timeout on every failover.
 
 See [android/README.md](android/README.md) for the build, the signing setup, and the Play notes.
 

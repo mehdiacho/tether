@@ -43,6 +43,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -427,13 +431,95 @@ private fun dotColour(state: CallState): Color = when (state) {
 
 @Composable
 private fun SettingsTab(store: TetherStore) {
-    Column(Modifier.padding(20.dp)) {
-        Text("Server", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(
-            store.serverUrl.ifBlank { "not set" },
-            fontSize = 16.sp,
-            color = MaterialTheme.colorScheme.onSurface,
+    val scope = rememberCoroutineScope()
+    var draft by remember { mutableStateOf("") }
+    var addError by remember { mutableStateOf<String?>(null) }
+
+    // Ask the server where else it lives as soon as this screen opens, so the
+    // suggestions are there before the user starts typing an address by hand.
+    LaunchedEffect(Unit) { store.refreshServerInfo() }
+
+    Column(
+        Modifier
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+    ) {
+        Text("Server name", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedTextField(
+            value = store.serverName,
+            onValueChange = store::renameServer,
+            placeholder = { Text("NAS") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
         )
+
+        Spacer(Modifier.height(20.dp))
+
+        Text("Addresses", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "Tried from the top down. Whichever one answers moves up, so the app " +
+                "follows you between home and away on its own.",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        store.addresses.forEachIndexed { index, address ->
+            AddressRow(
+                address = address,
+                primary = index == 0,
+                check = store.addressChecks[address],
+                onTest = { scope.launch { store.testAddress(address) } },
+                onMakePrimary = { store.makePrimary(address) },
+                onRemove = { addError = store.removeAddress(address) },
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it; addError = null },
+                placeholder = { Text("100.79.15.57:8790") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.size(8.dp))
+            Button(onClick = {
+                addError = store.addAddress(draft)
+                if (addError == null) draft = ""
+            }) { Text("Add") }
+        }
+
+        addError?.let {
+            Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+        }
+
+        if (store.suggestedAddresses.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "The server also reports",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            store.suggestedAddresses.forEach { address ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        address,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f),
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    TextButton(onClick = { addError = store.addAddress(address) }) { Text("Add") }
+                }
+            }
+        }
 
         Spacer(Modifier.height(20.dp))
 
@@ -459,6 +545,81 @@ private fun SettingsTab(store: TetherStore) {
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/**
+ * One address, with what is known about it.
+ *
+ * The status line matters more than it looks: an address that has never been
+ * tested and one that failed are very different situations, and collapsing them
+ * into a bare list is what makes "it just doesn't work" impossible to diagnose
+ * from the far side of a phone call.
+ */
+@Composable
+private fun AddressRow(
+    address: String,
+    primary: Boolean,
+    check: AddressCheck?,
+    onTest: () -> Unit,
+    onMakePrimary: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(Modifier.padding(vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(
+                        when (check) {
+                            AddressCheck.Reachable -> Color(0xFF30A46C)
+                            is AddressCheck.Unreachable -> Color(0xFFE5484D)
+                            AddressCheck.Checking -> Color(0xFFF5A524)
+                            null -> MaterialTheme.colorScheme.outline
+                        },
+                        CircleShape,
+                    ),
+            )
+            Spacer(Modifier.size(8.dp))
+            Text(
+                address,
+                fontSize = 15.sp,
+                fontWeight = if (primary) FontWeight.SemiBold else FontWeight.Normal,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (primary) {
+                Text(
+                    "in use",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        (check as? AddressCheck.Unreachable)?.let {
+            Text(
+                it.reason,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(start = 16.dp),
+            )
+        }
+
+        Row(modifier = Modifier.padding(start = 8.dp)) {
+            TextButton(onClick = onTest) {
+                Text(if (check == AddressCheck.Checking) "Testing…" else "Test")
+            }
+            if (!primary) {
+                TextButton(onClick = onMakePrimary) { Text("Use first") }
+                TextButton(
+                    onClick = onRemove,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text("Remove") }
+            }
+        }
     }
 }
 
