@@ -1,0 +1,26 @@
+node_modules/
+data/
+.env
+.mcp.json
+*.log
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/app/release/
+*.keystore
+*.jks
+
+# A copy of the live database. Contains device push tokens and pairing state,
+# so this is a credential leak, not just noise.
+data.bak/
+
+# Host-side mount for the Firebase service-account key (see docker-compose.yml).
+secrets/
+
+# Build outputs. Releases carry the APK; the repo should not.
+*.apk
+*.aab

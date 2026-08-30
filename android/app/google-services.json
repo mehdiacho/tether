@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "836189130640",
+    "project_id": "tether-mehdiacho",
+    "storage_bucket": "tether-mehdiacho.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:836189130640:android:08f07b88cd98c49ff46d15",
+        "android_client_info": {
+          "package_name": "tech.mehdiacho.tether"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDh7NVtG8uUflp5_CSOxc2JuywjZbDVhN4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

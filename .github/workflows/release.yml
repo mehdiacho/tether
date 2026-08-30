@@ -1,0 +1,202 @@
+name: Release
+
+# A merged PR into main is what cuts a release. Nothing else does.
+#
+# The flow is: work on `dev`, open a PR into `main`, merge it. That merge bumps
+# the version, tags it, builds a signed APK, and publishes a GitHub release with
+# the APK attached. A release that can happen by accident is a release nobody
+# trusts, so pushing straight to main deliberately does not trigger this.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  # An escape hatch for re-cutting a release without an empty PR.
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which part of the version to bump'
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write   # commit the version bump, push the tag, create the release
+  actions: write    # hand the new tag to publish-image.yml
+
+# Two releases racing would produce two tags for one version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Decide the version bump
+        id: bump
+        # PR text is attacker-controllable in the general case, so it arrives as
+        # environment variables rather than being interpolated into the script.
+        # A PR titled with a backtick would otherwise run as shell.
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_BUMP: ${{ inputs.bump }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          # Precedence: explicit dispatch input, then a label on the PR, then
+          # Conventional Commits in the PR title, then patch. Defaulting to
+          # patch is deliberate — the common case is a fix, and a wrong guess
+          # in that direction costs a version number, not a broken upgrade.
+          bump=patch
+          if [ "$EVENT" = workflow_dispatch ]; then
+            bump="$DISPATCH_BUMP"
+          elif printf '%s' "$PR_LABELS" | grep -qi '"major"'; then
+            bump=major
+          elif printf '%s' "$PR_LABELS" | grep -qi '"minor"'; then
+            bump=minor
+          elif printf '%s' "$PR_LABELS" | grep -qi '"patch"'; then
+            bump=patch
+          elif printf '%s' "$PR_TITLE" | grep -qE '^[a-zA-Z]+(\(.+\))?!:' \
+            || printf '%s' "$PR_BODY" | grep -q 'BREAKING CHANGE'; then
+            bump=major
+          elif printf '%s' "$PR_TITLE" | grep -qE '^feat(\(.+\))?:'; then
+            bump=minor
+          fi
+
+          echo "Chose: $bump"
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Releasing a version that does not compile is worse than not releasing.
+      - name: Typecheck the server
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+
+      - name: Bump the version
+        id: ver
+        run: |
+          set -euo pipefail
+          npm version "${{ steps.bump.outputs.bump }}" --no-git-tag-version
+          v=$(node -p "require('./package.json').version")
+          echo "Now at $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the bump and tag it
+        run: |
+          set -euo pipefail
+          git config user.name  'mehdiacho'
+          git config user.email 'mehdiacho@gmail.com'
+          git add package.json package-lock.json
+          git commit -m "Release v${{ steps.ver.outputs.version }}"
+          git tag "v${{ steps.ver.outputs.version }}"
+          git push origin main --follow-tags
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Restore the signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set. An unsigned APK cannot be installed, so this is fatal rather than a warning."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build the signed APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Name the APK after its version
+        id: apk
+        run: |
+          set -euo pipefail
+          src=android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$src" ]; then
+            echo "::error::No APK at $src"
+            ls -R android/app/build/outputs || true
+            exit 1
+          fi
+          out="tether-${{ steps.ver.outputs.version }}.apk"
+          cp "$src" "$out"
+
+          # A signed APK is the whole point of the release; verify rather than
+          # assume, because an unsigned one fails silently at install time on
+          # the phone, long after CI has gone green.
+          APKSIGNER=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}" -name apksigner -type f 2>/dev/null | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found — refusing to publish an APK whose signature was never checked"
+            exit 1
+          fi
+          "$APKSIGNER" verify --print-certs "$out"
+
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Install: download the APK below on the phone and open it."
+            echo
+            echo "- Version bump: **${{ steps.bump.outputs.bump }}**"
+            if [ -n "${PR_NUMBER:-}" ]; then
+              printf -- '- From PR #%s: %s\n' "$PR_NUMBER" "$PR_TITLE"
+            fi
+            echo "- APK SHA-256: \`${{ steps.apk.outputs.sha256 }}\`"
+          } > notes.md
+
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            "${{ steps.apk.outputs.path }}" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --notes-file notes.md
+
+      # A tag pushed with GITHUB_TOKEN does not trigger other workflows — that
+      # is GitHub's loop guard, not a bug. publish-image.yml therefore has to be
+      # asked directly. Non-fatal: the APK release already succeeded, and the
+      # container image is a separate artefact.
+      - name: Hand the tag to the image publisher
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run publish-image.yml --ref "v${{ steps.ver.outputs.version }}"
+
+      # dev is now one commit behind main (the version bump). Catch it up so the
+      # next PR is not permanently carrying a phantom diff. Fails harmlessly if
+      # dev has moved on in the meantime, in which case merge it by hand.
+      - name: Catch dev up to main
+        continue-on-error: true
+        run: git push origin main:dev

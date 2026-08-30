@@ -1,0 +1,24 @@
+# The build context is copied to the Docker daemon before anything runs, so what
+# is excluded here is mostly about not shipping hundreds of megabytes of Android
+# build output to a NAS over the network — and about never baking a credential
+# into a layer.
+
+.env
+.mcp.json
+*.log
+
+node_modules/
+data/
+data.bak/
+
+# The Android app is a separate artefact. Nothing in the server image needs it.
+android/
+
+.git/
+.gitignore
+
+# Docs and tests are not part of the runtime.
+docs/
+README.md
+CHANGELOG.md
+test-flow.sh

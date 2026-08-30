@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup is off in the manifest; this exists so the tooling has something to
+     point at if it is ever turned on. The client token must never be backed up
+     to a Google account. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="tether.xml" />
+</full-backup-content>

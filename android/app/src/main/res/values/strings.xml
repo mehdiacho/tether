@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tether</string>
+
+    <!-- Channel ids double as resource values so the manifest can name the
+         default FCM channel without duplicating a magic string. -->
+    <string name="channel_calls">tether_calls</string>
+    <string name="channel_messages">tether_messages</string>
+    <string name="channel_ongoing">tether_ongoing</string>
+</resources>

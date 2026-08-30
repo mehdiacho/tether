@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Tether</title>
+<style>
+  :root{
+    --ground:#EEF1F0; --surface:#F7F9F8; --surface-2:#E4E9E7;
+    --ink:#131E1C; --ink-soft:#475854; --ink-faint:#7C8D89; --rule:#CBD5D2;
+    --brass:#9A6B21; --brass-soft:#F0E3CC;
+    --pending:#A8681B; --resolved:#2F6B58; --refused:#9C4A34;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --ground:#0D1614; --surface:#131F1D; --surface-2:#1B2926;
+      --ink:#DEE7E4; --ink-soft:#A0B1AD; --ink-faint:#6E807C; --rule:#273834;
+      --brass:#D6A254; --brass-soft:#2A2113;
+      --pending:#D69A4E; --resolved:#6FBFA2; --refused:#D2836B;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ground); color:var(--ink);
+    font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    padding:0 16px calc(48px + env(safe-area-inset-bottom));
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:640px;margin:0 auto}
+  header{display:flex;align-items:center;gap:10px;padding:22px 0 18px;border-bottom:1px solid var(--rule);margin-bottom:20px}
+  h1{font-size:1.06rem;font-weight:600;margin:0;letter-spacing:-.01em;flex:1}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-faint);transition:background .3s}
+  .dot.live{background:var(--resolved);box-shadow:0 0 0 3px color-mix(in srgb,var(--resolved) 22%,transparent)}
+  .count{font:500 .72rem/1 ui-monospace,monospace;color:var(--ink-faint);letter-spacing:.08em;text-transform:uppercase}
+
+  .card{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:16px 18px;margin-bottom:12px}
+  .card.urgent{border-left:3px solid var(--refused)}
+  .card.high{border-left:3px solid var(--pending)}
+  .meta{display:flex;flex-wrap:wrap;gap:6px 12px;font:500 .68rem/1.4 ui-monospace,monospace;color:var(--ink-faint);letter-spacing:.07em;text-transform:uppercase;margin-bottom:8px}
+  .kind{color:var(--brass)}
+  .title{font-weight:600;font-size:1.02rem;margin:0 0 6px;text-wrap:balance}
+  .body{color:var(--ink-soft);font-size:.93rem;margin:0 0 12px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .ctx{background:var(--surface-2);border-radius:6px;padding:9px 11px;margin:0 0 12px;font:.78rem/1.5 ui-monospace,monospace;color:var(--ink-soft);overflow-x:auto}
+  .ctx div{white-space:nowrap}
+  .ctx b{color:var(--ink-faint);font-weight:500}
+
+  .actions{display:flex;flex-wrap:wrap;gap:8px}
+  button{
+    font:500 .9rem/1 inherit;font-family:inherit;padding:11px 16px;border-radius:7px;
+    border:1px solid var(--rule);background:var(--surface-2);color:var(--ink);cursor:pointer;
+    min-height:44px; /* thumb-sized: this gets used one-handed on a phone */
+  }
+  button:hover{border-color:var(--brass)}
+  button:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+  button.primary{background:var(--brass-soft);border-color:var(--brass);color:var(--brass);font-weight:600}
+  button.refuse{color:var(--refused);border-color:transparent;background:transparent}
+  button:disabled{opacity:.45;cursor:default}
+  .free{display:flex;gap:8px;width:100%}
+  input[type=text]{
+    flex:1;min-width:0;font:inherit;font-size:.93rem;padding:11px 13px;border-radius:7px;
+    border:1px solid var(--rule);background:var(--ground);color:var(--ink);
+  }
+  input[type=text]:focus{outline:2px solid var(--brass);outline-offset:-1px;border-color:transparent}
+
+  audio{width:100%;margin:0 0 12px;height:38px}
+  .empty{text-align:center;color:var(--ink-faint);padding:56px 20px;font-size:.93rem}
+  .empty svg{display:block;margin:0 auto 14px;opacity:.4}
+  .toast{
+    position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom));
+    background:var(--ink);color:var(--ground);padding:11px 18px;border-radius:8px;font-size:.87rem;
+    opacity:0;pointer-events:none;transition:opacity .25s;z-index:10;max-width:calc(100vw - 32px)
+  }
+  .toast.show{opacity:1}
+  .setup{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:22px}
+  .setup label{display:block;font-size:.83rem;color:var(--ink-soft);margin-bottom:8px}
+  .setup input{width:100%;margin-bottom:12px}
+  .hist{margin-top:32px;padding-top:16px;border-top:1px solid var(--rule)}
+  .hist h2{font:500 .7rem/1 ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 12px}
+  .hrow{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--rule);font-size:.85rem;align-items:baseline}
+  .hrow:last-child{border-bottom:none}
+  .hrow .t{flex:1;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .st{font:500 .66rem/1 ui-monospace,monospace;letter-spacing:.07em;text-transform:uppercase;padding:4px 7px;border-radius:4px;background:var(--surface-2)}
+  .st.answered{color:var(--resolved)} .st.refused{color:var(--refused)}
+  .st.timed_out{color:var(--ink-faint)} .st.cancelled{color:var(--ink-faint)}
+
+  /* A call's recording IS the message, so it stays playable after the request
+     settles — unlike a voice rendering of a notification, which is disposable. */
+  .card.call{border-left:3px solid var(--brass)}
+  .rec{padding:10px 0;border-bottom:1px solid var(--rule)}
+  .rec:last-child{border-bottom:none}
+  .rec .t{font-size:.88rem;margin-bottom:6px;display:flex;gap:8px;align-items:baseline}
+  .rec .t span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rec .t em{font:500 .66rem/1 ui-monospace,monospace;color:var(--ink-faint);font-style:normal}
+  .rec audio{margin:0;height:34px}
+
+  .sch{display:flex;gap:10px;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--rule)}
+  .sch:last-child{border-bottom:none}
+  .sch .s-main{flex:1;min-width:0}
+  .sch .s-title{font-size:.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sch .s-when{font:500 .68rem/1.5 ui-monospace,monospace;color:var(--ink-faint)}
+  .sch.off .s-title,.sch.off .s-when{opacity:.45}
+  .sch button{min-height:32px;padding:6px 10px;font-size:.78rem}
+
+  /* Pairing sheet. A QR is the whole point of this panel, so it gets a fixed
+     white plate regardless of theme — inverted codes do not scan. */
+  button.ghost{background:transparent;border-color:transparent;color:var(--ink-soft);min-height:32px;padding:6px 10px;font-size:.8rem}
+  button.ghost:hover{color:var(--brass)}
+  dialog#pair{
+    border:1px solid var(--rule);border-radius:12px;background:var(--surface);color:var(--ink);
+    padding:0;width:min(400px,calc(100vw - 32px));
+  }
+  dialog#pair::backdrop{background:rgba(0,0,0,.45)}
+  .pair-head{display:flex;align-items:center;gap:8px;padding:14px 12px 14px 18px;border-bottom:1px solid var(--rule)}
+  .pair-head strong{flex:1;font-size:.95rem}
+  .pair-body{padding:18px}
+  .pair-plate{background:#fff;border-radius:10px;padding:12px;margin:0 auto 16px;width:min(240px,60vw)}
+  .pair-plate svg{display:block;width:100%;height:auto}
+  .pair-code{
+    font:600 1.5rem/1 ui-monospace,monospace;letter-spacing:.12em;text-align:center;margin:0 0 6px;
+    color:var(--ink);
+  }
+  .pair-note{font-size:.82rem;color:var(--ink-faint);text-align:center;margin:0 0 14px;text-wrap:balance}
+  .pair-note.warn{color:var(--pending)}
+  .pair-done{text-align:center;padding:22px 0}
+  .pair-done .tick{font-size:2rem;color:var(--resolved);line-height:1}
+  .pair-field{margin-bottom:14px}
+  .pair-field label{display:block;font:500 .68rem/1.4 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:6px}
+  .pair-field select,.pair-field input{
+    width:100%;font:inherit;font-size:.85rem;padding:9px 11px;border-radius:7px;
+    border:1px solid var(--rule);background:var(--ground);color:var(--ink);
+  }
+  .pair-actions{display:flex;gap:8px}
+  .pair-actions button{flex:1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot" id="dot"></span>
+    <h1>Tether</h1>
+    <button class="ghost" id="pairbtn" hidden>Pair phone</button>
+    <span class="count" id="count"></span>
+  </header>
+  <main id="main"></main>
+</div>
+<div class="toast" id="toast"></div>
+
+<dialog id="pair">
+  <div class="pair-head">
+    <strong>Pair a phone</strong>
+    <button class="ghost" id="pairclose" aria-label="Close">Close</button>
+  </div>
+  <div class="pair-body" id="pairbody"></div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const main = $('main'), toast = $('toast');
+
+// Token comes from ?token= once, then lives in localStorage so the page can be
+// bookmarked on a phone home screen without the secret sitting in the URL bar.
+let token = new URL(location).searchParams.get('token') || localStorage.getItem('tether_token') || '';
+if (new URL(location).searchParams.get('token')) {
+  localStorage.setItem('tether_token', token);
+  history.replaceState({}, '', location.pathname);
+}
+
+let pending = [], history_ = [], schedules = [], ws = null, toastTimer = null;
+
+function say(msg) {
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 2600);
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function ago(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+
+function left(ts) {
+  const s = Math.round((ts - Date.now()) / 1000);
+  if (s <= 0) return 'expired';
+  if (s < 60) return s + 's left';
+  if (s < 3600) return Math.round(s / 60) + 'm left';
+  return Math.round(s / 3600) + 'h left';
+}
+
+/* ---------------------------------------------------------------- setup -- */
+
+function renderSetup(msg) {
+  main.innerHTML = `<div class="setup">
+    <label for="tok">${esc(msg || 'Paste your client token to connect.')}</label>
+    <input type="text" id="tok" placeholder="tet_client_…" autocomplete="off" spellcheck="false">
+    <button class="primary" id="save">Connect</button>
+    <p class="pair-note" style="text-align:left;margin:14px 0 0">
+      It is one of the values in <code>CLIENT_TOKENS</code> on the server.
+      Pairing a phone needs no token at all &mdash; run
+      <code>npm run pair</code> (or <code>docker exec -it tether node src/cli/pair.ts</code>)
+      and scan the QR.
+    </p>
+  </div>`;
+  $('save').onclick = () => {
+    const v = $('tok').value.trim();
+    if (!v) return;
+    token = v;
+    localStorage.setItem('tether_token', v);
+    boot();
+  };
+  $('tok').onkeydown = (e) => { if (e.key === 'Enter') $('save').click(); };
+}
+
+/* ----------------------------------------------------------------- api --- */
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(opts.headers || {}) },
+  });
+  if (res.status === 401) throw new Error('unauthorized');
+  return res;
+}
+
+async function answer(id, value, refused) {
+  // Optimistic: drop it from the list immediately so a slow network never makes
+  // you tap twice. The server is the arbiter; a 409 just means someone beat you.
+  pending = pending.filter((r) => r.id !== id);
+  render();
+  try {
+    const res = await api('/api/requests/' + id + '/answer', {
+      method: 'POST',
+      body: JSON.stringify(refused ? { refused: true } : { answer: value }),
+    });
+    if (res.status === 409) say('Already answered elsewhere');
+    else if (!res.ok) say('Failed — try again');
+    else say(refused ? 'Refused' : 'Sent: ' + value);
+  } catch {
+    say('Network error');
+    load();
+  }
+}
+
+/* -------------------------------------------------------------- render --- */
+
+function card(r) {
+  const el = document.createElement('div');
+  el.className = 'card' + (r.kind === 'call' ? ' call'
+    : r.priority === 'urgent' ? ' urgent' : r.priority === 'high' ? ' high' : '');
+
+  const ctx = r.context && Object.keys(r.context).length
+    ? `<div class="ctx">${Object.entries(r.context)
+        .map(([k, v]) => `<div><b>${esc(k)}</b> ${esc(v)}</div>`).join('')}</div>`
+    : '';
+
+  const audio = r.audioId
+    ? `<audio controls preload="none" src="/audio/${esc(r.audioId)}?token=${encodeURIComponent(token)}"></audio>` : '';
+
+  el.innerHTML = `
+    <div class="meta">
+      <span class="kind">${esc(r.kind)}</span>
+      <span>${esc(r.agentName)}</span>
+      <span>${ago(r.createdAt)}</span>
+      <span>${left(r.expiresAt)}</span>
+    </div>
+    <p class="title">${esc(r.title)}</p>
+    ${r.body ? `<p class="body">${esc(r.body)}</p>` : ''}
+    ${ctx}${audio}
+    <div class="actions"></div>`;
+
+  const actions = el.querySelector('.actions');
+
+  const btn = (label, cls, fn) => {
+    const b = document.createElement('button');
+    b.className = cls; b.textContent = label;
+    b.onclick = () => { actions.querySelectorAll('button').forEach((x) => (x.disabled = true)); fn(); };
+    actions.appendChild(b);
+    return b;
+  };
+
+  if (r.kind === 'notify' || (r.kind === 'call' && !(r.choices && r.choices.length))) {
+    btn('Dismiss', '', () => answer(r.id, 'dismissed', false));
+  } else if (r.choices && r.choices.length) {
+    r.choices.forEach((c, i) => btn(c, i === 0 ? 'primary' : '', () => answer(r.id, c, false)));
+    btn('Refuse', 'refuse', () => answer(r.id, null, true));
+  } else if (r.kind === 'action') {
+    btn('Done', 'primary', () => answer(r.id, 'done', false));
+    btn('Refuse', 'refuse', () => answer(r.id, null, true));
+  } else {
+    const wrap = document.createElement('div');
+    wrap.className = 'free';
+    wrap.innerHTML = `<input type="text" placeholder="Type your answer…" autocomplete="off">`;
+    const input = wrap.querySelector('input');
+    const send = document.createElement('button');
+    send.className = 'primary'; send.textContent = 'Send';
+    send.onclick = () => { if (input.value.trim()) answer(r.id, input.value.trim(), false); };
+    input.onkeydown = (e) => { if (e.key === 'Enter') send.click(); };
+    wrap.appendChild(send);
+    actions.appendChild(wrap);
+    btn('Refuse', 'refuse', () => answer(r.id, null, true));
+  }
+
+  return el;
+}
+
+function render() {
+  $('count').textContent = pending.length ? pending.length + ' waiting' : '';
+  main.innerHTML = '';
+
+  if (!pending.length) {
+    main.innerHTML = `<div class="empty">
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M4 12h4l2-6 4 12 2-6h4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Nothing waiting on you.</div>`;
+  } else {
+    pending.forEach((r) => main.appendChild(card(r)));
+  }
+
+  renderCalls();
+  renderSchedules();
+
+  const done = history_.filter((r) => r.status !== 'pending' && r.kind !== 'call').slice(0, 12);
+  if (done.length) {
+    const h = document.createElement('div');
+    h.className = 'hist';
+    h.innerHTML = '<h2>Recent</h2>' + done.map((r) =>
+      `<div class="hrow"><span class="t">${esc(r.title)}</span>
+       <span class="st ${esc(r.status)}">${esc(r.status.replace('_', ' '))}</span></div>`).join('');
+    main.appendChild(h);
+  }
+}
+
+/* ------------------------------------------------------------- pairing --- */
+
+/**
+ * Pairing, without leaving the app.
+ *
+ * The phone needs two things: where the server is, and a code proving someone
+ * authorised it. Typing either into a phone is miserable, so both go into a QR
+ * and the app scans it. The QR itself is rendered server-side, so this panel is
+ * a handful of DOM calls and no library.
+ *
+ * The address is a choice rather than a guess. The server can offer candidates
+ * — what PUBLIC_URL says, what this page was loaded over, the host's LAN
+ * addresses — but only a human knows whether the phone will be on the same wifi
+ * or coming in over the internet. Picking wrong yields a QR that scans and then
+ * cannot connect, which is a worse failure than a dropdown.
+ */
+
+let pairTimers = [];
+let pairState = null;
+
+function stopPairTimers() {
+  pairTimers.forEach(clearInterval);
+  pairTimers = [];
+}
+
+function openPair() {
+  $('pair').showModal();
+  mintCode();
+}
+
+function closePair() {
+  stopPairTimers();
+  pairState = null;
+  $('pair').close();
+}
+
+async function mintCode(url) {
+  stopPairTimers();
+  $('pairbody').innerHTML = '<p class="pair-note">Minting a code…</p>';
+  try {
+    const res = await api('/api/pair/start', {
+      method: 'POST',
+      body: JSON.stringify(url ? { url } : {}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      $('pairbody').innerHTML = `<p class="pair-note warn">${esc(err.error || 'Could not mint a code.')}</p>`;
+      return;
+    }
+    pairState = await res.json();
+    renderPair();
+  } catch {
+    $('pairbody').innerHTML = '<p class="pair-note warn">Could not reach the server.</p>';
+  }
+}
+
+function renderPair() {
+  const p = pairState;
+  // Whatever the server chose has to be in the list, or the select would silently
+  // fall back to a different address than the QR was built with.
+  const options = p.addresses.includes(p.url) ? p.addresses : [p.url, ...p.addresses];
+
+  $('pairbody').innerHTML = `
+    <div class="pair-plate">${p.qrSvg}</div>
+    <p class="pair-code">${esc(p.code)}</p>
+    <p class="pair-note" id="pairexp"></p>
+    <div class="pair-field">
+      <label for="pairurl">Address the phone should use</label>
+      <select id="pairurl">
+        ${options.map((a) => `<option value="${esc(a)}"${a === p.url ? ' selected' : ''}>${esc(a)}</option>`).join('')}
+        <option value="__custom">Something else…</option>
+      </select>
+    </div>
+    <div class="pair-actions">
+      <button id="pairnew">New code</button>
+    </div>`;
+
+  $('pairnew').onclick = () => mintCode(p.url);
+  $('pairurl').onchange = (e) => {
+    if (e.target.value !== '__custom') return mintCode(e.target.value);
+    const typed = prompt('Address the phone should use', p.url);
+    if (typed) mintCode(typed);
+    else e.target.value = p.url;
+  };
+
+  const tick = () => {
+    const secs = Math.round((p.expiresAt - Date.now()) / 1000);
+    const exp = $('pairexp');
+    if (!exp) return;
+    if (secs > 0) {
+      exp.className = 'pair-note';
+      exp.textContent = `Open Tether on the phone, tap Scan QR code. Expires in ${secs}s.`;
+    } else {
+      exp.className = 'pair-note warn';
+      exp.textContent = 'This code has expired.';
+    }
+  };
+  tick();
+  pairTimers.push(setInterval(tick, 1000));
+
+  pairTimers.push(setInterval(async () => {
+    try {
+      const status = await (await api('/api/pair/status/' + encodeURIComponent(p.code))).json();
+      if (status.state === 'claimed') {
+        stopPairTimers();
+        $('pairbody').innerHTML = `<div class="pair-done">
+          <div class="tick">✓</div>
+          <p class="pair-note">Paired with ${esc(status.device?.name || 'a device')}.</p>
+        </div>`;
+        say('Device paired');
+        setTimeout(closePair, 2200);
+      }
+    } catch {
+      /* A blip mid-poll is not worth surfacing; the next tick retries. */
+    }
+  }, 2000));
+}
+
+/* --------------------------------------------------------------- calls --- */
+
+/**
+ * Recordings stay listed after the call settles. A voice rendering of a
+ * notification is disposable — the text says the same thing — but a call
+ * recording is the only artefact of the call, so it has to remain playable.
+ *
+ * Playback goes through /v/:id/:token rather than /audio/:id so the same URL
+ * works from a notification tap, where there is no client token.
+ */
+function renderCalls() {
+  const calls = [...pending, ...history_]
+    .filter((r) => r.kind === 'call' && r.audioId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 6);
+  if (!calls.length) return;
+
+  const el = document.createElement('div');
+  el.className = 'hist';
+  el.innerHTML = '<h2>Calls</h2>' + calls.map((r) => `
+    <div class="rec">
+      <div class="t"><span>${esc(r.title)}</span><em>${ago(r.createdAt)}</em></div>
+      <audio controls preload="none" src="/v/${esc(r.id)}/${encodeURIComponent(r.actionToken)}"></audio>
+    </div>`).join('');
+  main.appendChild(el);
+}
+
+/* ----------------------------------------------------------- schedules --- */
+
+async function toggleSchedule(id, enabled) {
+  await api('/api/schedules/' + id + '/enabled', { method: 'POST', body: JSON.stringify({ enabled }) });
+  await loadSchedules();
+  render();
+  say(enabled ? 'Resumed' : 'Paused');
+}
+
+async function removeSchedule(id, title) {
+  if (!confirm('Delete the schedule "' + title + '"?')) return;
+  await api('/api/schedules/' + id, { method: 'DELETE' });
+  await loadSchedules();
+  render();
+  say('Deleted');
+}
+
+function renderSchedules() {
+  if (!schedules.length) return;
+
+  const el = document.createElement('div');
+  el.className = 'hist';
+  el.innerHTML = '<h2>Scheduled</h2>';
+
+  for (const s of schedules) {
+    const row = document.createElement('div');
+    row.className = 'sch' + (s.enabled ? '' : ' off');
+    row.innerHTML = `<div class="s-main">
+        <div class="s-title">${esc(s.title)}</div>
+        <div class="s-when">${esc(s.kind)} · ${esc(s.cron)} · ${
+          s.enabled ? esc(s.next?.[0] || 'never') : 'paused'}</div>
+      </div>`;
+
+    const pause = document.createElement('button');
+    pause.textContent = s.enabled ? 'Pause' : 'Resume';
+    pause.onclick = () => toggleSchedule(s.id, !s.enabled);
+
+    const del = document.createElement('button');
+    del.className = 'refuse';
+    del.textContent = 'Delete';
+    del.onclick = () => removeSchedule(s.id, s.title);
+
+    row.append(pause, del);
+    el.appendChild(row);
+  }
+  main.appendChild(el);
+}
+
+/* ---------------------------------------------------------------- live --- */
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/api/stream?token=${encodeURIComponent(token)}`);
+
+  ws.onopen = () => $('dot').classList.add('live');
+  ws.onclose = () => {
+    $('dot').classList.remove('live');
+    // Reconnect: a phone that slept must come back without a manual refresh.
+    setTimeout(() => { if (token) connect(); }, 3000);
+  };
+  ws.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'hello') pending = ev.pending;
+    else if (ev.type === 'request.created') {
+      pending = [ev.request, ...pending.filter((r) => r.id !== ev.request.id)];
+      if (ev.request.priority === 'urgent' || ev.request.priority === 'high') say(ev.request.title);
+    } else if (ev.type === 'request.resolved') {
+      pending = pending.filter((r) => r.id !== ev.request.id);
+      history_ = [ev.request, ...history_.filter((r) => r.id !== ev.request.id)];
+    }
+    render();
+  };
+}
+
+async function loadSchedules() {
+  try {
+    schedules = (await (await api('/api/schedules')).json()).schedules;
+  } catch {
+    schedules = [];
+  }
+}
+
+async function load() {
+  const res = await api('/api/requests?all=1');
+  const all = (await res.json()).requests;
+  pending = all.filter((r) => r.status === 'pending');
+  history_ = all.filter((r) => r.status !== 'pending');
+  await loadSchedules();
+  render();
+}
+
+async function boot() {
+  if (!token) return renderSetup();
+  try {
+    await load();
+    connect();
+    $('pairbtn').hidden = false;
+    setInterval(render, 30000); // keep the relative timestamps honest
+  } catch {
+    localStorage.removeItem('tether_token');
+    token = '';
+    renderSetup('That token was rejected. Paste a valid client token.');
+  }
+}
+
+$('pairbtn').onclick = openPair;
+$('pairclose').onclick = closePair;
+$('pair').addEventListener('close', stopPairTimers); // covers Esc, which bypasses the button
+
+boot();
+</script>
+</body>
+</html>

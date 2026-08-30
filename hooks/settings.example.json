@@ -1,0 +1,62 @@
+{
+  "//": "Merge the `env` and `hooks` blocks into ~/.claude/settings.json. Paths must be absolute — hooks do not run from the project directory.",
+
+  "env": {
+    "TETHER_URL": "http://192.168.0.2:8790",
+    "TETHER_AGENT_TOKEN": "<an agent token, NOT a client token>",
+    "TETHER_RELAY": "vanta",
+    "TETHER_RING": "blocked"
+  },
+
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node X:/Projects/tether/hooks/tether-hook.mjs", "timeout": 6 }
+        ]
+      }
+    ]
+  }
+}

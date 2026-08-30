@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Plain HTTP is allowed, because the servers this app talks to are the user's
+    own and most of them live at http://192.168.x.x:8790 with no certificate to
+    speak of. Since Android 9 that is blocked by default, and the block lands at
+    exactly the worst moment: the pairing request fails with a policy error that
+    reads like the server is down.
+
+    There is no narrower rule available. The config file can only exempt named
+    domains, and the whole premise here is that the address is supplied by the
+    user at pair time — it is not known when this file is written.
+
+    HTTPS is still the right answer the moment there is a reverse proxy or a
+    tunnel in front of the server: the pairing claim and the device token both
+    cross this connection, and on a shared network cleartext means anyone on it
+    can read them. Nothing here prefers HTTP — it only stops the platform from
+    refusing it.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

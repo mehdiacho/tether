@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 13+ gates every notification behind a runtime grant. Without it
+         the app is installed and silent, which for this app means broken. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      The permission that makes a ring a ring. Without it an incoming call is a
+      notification in the shade instead of a screen that lights up the phone.
+
+      On Android 14+ this is only auto-granted to apps Play classifies as
+      calling or alarm apps. Tether declares itself as one; if the grant is
+      missing at runtime the app detects it and sends the user to Settings
+      rather than silently degrading. See CallNotifier.canRingFullScreen().
+    -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!--
+      A call you can only listen to is a voicemail. The microphone is what makes
+      it a conversation, and it is only ever opened between the agent finishing
+      a turn and the reply being sent - never while the app is idle.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      Package visibility. Since Android 11 an app cannot see services it has not
+      declared an interest in, and SpeechRecognizer.isRecognitionAvailable() is
+      a query like any other - without this it reports no recogniser on a phone
+      that plainly has one, and the live draft silently never appears.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <application
+        android:name=".TetherApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Tether">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Tether">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+              Pairing links. A QR scanned by any camera app, or a link tapped in
+              a message, lands here with the server address and the code already
+              in it.
+
+              A private scheme rather than an https App Link on purpose: an App
+              Link would need a verified domain, and this app is meant to pair
+              with whatever server the user happens to run.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tether" android:host="pair" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The ringing screen.
+
+          showOnLockScreen + turnScreenOn are what make this behave like a phone
+          call rather than an app you have to go and find: the device wakes, the
+          screen comes on, and the call is already in front of you.
+
+          excludeFromRecents + noHistory keep a finished call out of the task
+          switcher — a dead ring you can swipe back to is confusing.
+        -->
+        <activity
+            android:name=".call.IncomingCallActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Tether.Call" />
+
+        <!--
+          mediaPlayback, not phoneCall.
+
+          phoneCall requires MANAGE_OWN_CALLS and a self-managed
+          ConnectionService; declaring it without one is how you get a crash on
+          Android 14. What this service actually does is play audio — the
+          ringtone, then the agent's speech — so mediaPlayback is both the
+          honest declaration and the one that works. Moving to a real
+          ConnectionService is the upgrade path for two-way calling.
+        -->
+        <service
+            android:name=".call.CallService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback|microphone" />
+
+        <service
+            android:name=".push.TetherMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Answer/decline taps from the notification itself, so a call can be
+             handled without unlocking the phone. -->
+        <receiver
+            android:name=".call.CallActionReceiver"
+            android:exported="false" />
+
+        <!-- Answering an agent's question from the notification's choice
+             buttons, without opening the app. -->
+        <receiver
+            android:name=".ui.MessageActionReceiver"
+            android:exported="false" />
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="@string/channel_messages" />
+
+        <!--
+          Ask Play Services to fetch the barcode scanning module at install time
+          rather than on first use. Pairing is the first thing a new user does,
+          and a download stall right there reads as a broken app.
+        -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
+
+    </application>
+
+</manifest>
