@@ -37,9 +37,56 @@ export interface TetherRequest {
    *  notification payload, unlike a long-lived client token. */
   actionToken: string;
   agentName: string;
+  /**
+   * Who sent this, as an authenticated peer name — not the self-asserted
+   * `agentName`. Empty for anything created before peers existed, or by a
+   * legacy agent token that maps to no peer row.
+   */
+  fromPeer: string;
+  /**
+   * Who is being asked. **Empty means the human**, which is what every request
+   * predating agent-to-agent was, so old rows keep working untouched.
+   *
+   * This one field is what turns `ask` into a general rendezvous: the state
+   * machine never cared who answered, only that somebody did.
+   */
+  toPeer: string;
+  /** Monotonic insertion order. Drives per-peer inbox cursors. */
+  seq: number;
   createdAt: number;
   expiresAt: number;
   resolvedAt: number | null;
+}
+
+/* ------------------------------------------------------------------ peers -- */
+
+/**
+ * What a peer is.
+ *
+ * `human` exists as a peer so that "ask Mehdi" and "ask Astra" are the same
+ * call with a different address, rather than two subsystems. It is NOT a login:
+ * the human peer holds no token and can never authenticate as itself. Anything
+ * addressed to a human is answerable only over the client surface — the phone
+ * and the web UI — and an agent that tries is refused.
+ *
+ * That asymmetry is the security boundary of the whole feature. If an agent
+ * could answer a human-addressed request, a single prompt-injected agent would
+ * be able to grant itself every approval Tether exists to gate.
+ */
+export type PeerKind = 'agent' | 'human';
+
+export interface Peer {
+  id: string;
+  /** Address. Lowercase, stable, unique: 'claude-code', 'astra', 'mehdi'. */
+  name: string;
+  kind: PeerKind;
+  /** Which tool this peer runs as, for display: 'claude-code', 'codex', ''. */
+  tool: string;
+  /** One line for the peer list, so an agent knows who it is talking to. */
+  description: string;
+  createdAt: number;
+  lastSeenAt: number;
+  revoked: boolean;
 }
 
 export interface ResolveResult {

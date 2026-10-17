@@ -27,6 +27,7 @@ import { getAudio, getByActionToken, putAudio } from './db.ts';
 import { configuredChannels } from './channels.ts';
 import * as callsession from './callsession.ts';
 import * as devices from './devices.ts';
+import * as peers from './peers.ts';
 import { pushEnabled } from './push.ts';
 import * as scheduler from './scheduler.ts';
 import * as sessions from './sessions.ts';
@@ -162,13 +163,43 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
 
   /* ----------------------------------------------------------------- MCP -- */
 
-  const requireAgent = requireToken(config.agentTokens, 'agent');
+  /**
+   * Agent auth for the plain REST routes (the session registry, which hooks
+   * post to). Accepts a peer token as well as a legacy AGENT_TOKENS entry, so
+   * an agent that has been given a peer identity does not need to keep the old
+   * one around just to register itself.
+   */
+  const requireAgent = (req: Request, res: Response, next: NextFunction): void => {
+    if (!peers.authenticate(bearer(req))) {
+      res.status(401).json({ error: 'A valid agent token is required.' });
+      return;
+    }
+    next();
+  };
 
-  app.all('/mcp', requireAgent, async (req: Request, res: Response) => {
+  app.all('/mcp', async (req: Request, res: Response) => {
+    /**
+     * Identity comes from the token, not from a header.
+     *
+     * `X-Agent-Name` used to decide who the caller was. That was fine while the
+     * only audience was a human reading a notification — a wrong label is a
+     * cosmetic bug. It stops being fine the moment agents can address each
+     * other, because a label anyone can set is a label anyone can forge. So the
+     * token now decides, and the header survives only as a display hint for
+     * legacy tokens that map to no peer.
+     */
+    const identity = peers.authenticate(bearer(req));
+    if (!identity) {
+      res.status(401).json({ error: 'A valid agent or peer token is required.' });
+      return;
+    }
+    const self = peers.addressOf(identity);
+    const agentName =
+      identity.kind === 'peer' ? identity.peer.name : req.header('x-agent-name') || 'agent';
+
     // Stateless transport: a fresh server per request. Blocking tool calls are
     // held open by the HTTP request itself, and durability lives in SQLite, so
     // there is no in-memory session to lose on restart.
-    const agentName = req.header('x-agent-name') || 'agent';
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -178,7 +209,7 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     });
 
     try {
-      const server = buildMcpServer(agentName);
+      const server = buildMcpServer(agentName, self);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
@@ -226,10 +257,23 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     const { answer, refused } = req.body as { answer?: string; refused?: boolean };
     const status = refused ? 'refused' : 'answered';
 
-    const r = requests.resolve(param(req, 'id'), status, refused ? null : (answer ?? ''));
+    // 'human': this surface can only ever answer what was addressed to the
+    // human. A question one agent asked another belongs to that agent, and
+    // answering it here would make the asker attribute a human's words to a peer.
+    const r = requests.resolve(
+      param(req, 'id'),
+      status,
+      refused ? null : (answer ?? ''),
+      'human',
+    );
     if (!r) {
+      const current = requests.get(param(req, 'id'));
+      if (current && !requests.isForHuman(current)) {
+        res.status(403).json({ error: `addressed to peer "${current.toPeer}", not to you` });
+        return;
+      }
       // Not an error worth alarming a phone client over — someone else answered.
-      res.status(409).json({ error: 'already resolved', request: requests.get(param(req, 'id')) });
+      res.status(409).json({ error: 'already resolved', request: current });
       return;
     }
     res.json(r);
@@ -253,7 +297,12 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     const refused = req.query['refused'] === '1';
     const answer = typeof req.query['answer'] === 'string' ? req.query['answer'] : '';
 
-    const r = requests.resolve(id, refused ? 'refused' : 'answered', refused ? null : answer);
+    const r = requests.resolve(
+      id,
+      refused ? 'refused' : 'answered',
+      refused ? null : answer,
+      'human',
+    );
     res
       .status(r ? 200 : 409)
       .type('text/plain')
@@ -701,6 +750,9 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
   };
 
   requests.onChange((kind, request) => {
+    // Same reasoning as the push fan-out: the request feed is the human's view,
+    // and an agent asking another agent has no business on it.
+    if (!requests.isForHuman(request)) return;
     broadcast(
       kind === 'created'
         ? { type: 'request.created', request }
