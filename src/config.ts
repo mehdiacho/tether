@@ -58,6 +58,15 @@ export const config = {
   serverName: optional('SERVER_NAME', 'Tether'),
   dbPath: optional('DB_PATH', './data/tether.db'),
 
+  /**
+   * OAuth for /mcp, so Tether can be a claude.ai connector. Off by default:
+   * registration is open by design, so only enable it on a deliberately
+   * exposed server. See oauth.ts.
+   */
+  oauthEnabled: ['1', 'true', 'yes'].includes(optional('OAUTH_ENABLED').toLowerCase()),
+  /** Fixed issuer origin, e.g. https://tether.example.com. Blank: the request's own origin. */
+  oauthIssuer: optional('OAUTH_ISSUER', '').replace(/\/$/, ''),
+
   /** Tokens that may CREATE requests (agents). */
   agentTokens: tokenSet('AGENT_TOKENS'),
   /** Tokens that may READ and ANSWER requests (phone, web UI). */

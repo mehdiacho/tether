@@ -125,6 +125,8 @@ Everything comes from the environment; nothing secret is written to disk by the 
 | `NTFY_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` | no | **Ask-capable** when `PUBLIC_URL` is set — notifications carry tappable answer buttons. |
 | `FCM_CREDENTIALS` | for the app | Path to the Firebase service-account JSON. Without it the `app` channel is never registered and the phone never rings. |
 | `CALL_RING_SECONDS` | no | Default 45. How long a call rings before the server marks it missed. |
+| `OAUTH_ENABLED` | for connectors | Turns on OAuth for `/mcp` so Tether can be a claude.ai connector. Off by default. See [docs/public-connector.md](docs/public-connector.md). |
+| `OAUTH_ISSUER` | no | Fixed public origin, e.g. `https://tether.example.com`. Blank uses the origin each request arrived on. |
 
 **You don't need any third-party account.** Two channels work with nothing external:
 
