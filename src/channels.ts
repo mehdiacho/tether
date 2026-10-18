@@ -357,6 +357,8 @@ async function sendApp(r: TetherRequest): Promise<void> {
 export function startFanout(): () => void {
   return requests.onChange((event, request) => {
     if (event !== 'created') return;
+    // Agent-to-agent traffic is work, not a notification. It never rings.
+    if (!requests.isForHuman(request)) return;
     void sendApp(request);
     void sendNtfy(request);
     void sendTelegram(request);

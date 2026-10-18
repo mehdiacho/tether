@@ -28,3 +28,6 @@ android/app/release/
 # Build outputs. Releases carry the APK; the repo should not.
 *.apk
 *.aab
+
+# Local Codex config. Carries a live agent bearer token.
+/.codex/

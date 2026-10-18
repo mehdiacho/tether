@@ -55,6 +55,22 @@ export interface CreateArgs {
   timeoutSec?: number;
   audioId?: string | null;
   agentName?: string;
+  /** Authenticated sender. Empty for a legacy agent token with no peer row. */
+  fromPeer?: string;
+  /** Addressee. Empty — the default — means the human. */
+  toPeer?: string;
+}
+
+/**
+ * Is this request the human's to answer?
+ *
+ * The single predicate that keeps agent-to-agent traffic off the phone. An
+ * agent asking another agent a question is work, not a notification: fanning it
+ * out would make Tether ring all day, and showing it in the pending list would
+ * invite the human to answer a question that is not theirs.
+ */
+export function isForHuman(r: TetherRequest): boolean {
+  return r.toPeer === '';
 }
 
 export function create(args: CreateArgs): TetherRequest {
@@ -77,6 +93,8 @@ export function create(args: CreateArgs): TetherRequest {
     priority: args.priority ?? 'default',
     audioId: args.audioId ?? null,
     agentName: args.agentName ?? 'agent',
+    fromPeer: args.fromPeer ?? '',
+    toPeer: args.toPeer ?? '',
     createdAt: now,
     expiresAt: now + timeout * 1000,
   });
@@ -94,7 +112,27 @@ export function resolve(
   id: string,
   status: Exclude<RequestStatus, 'pending'>,
   answer: string | null,
+  /**
+   * Who is answering: 'human' for the phone and web UI, a peer name for an
+   * agent. Omitted means an internal caller (expiry sweep, cancellation) and
+   * skips the check.
+   *
+   * This is the boundary. A request addressed to the human must be unforgeable
+   * by ANY agent — otherwise a single prompt-injected agent answers its own
+   * approval and the human-in-the-loop guarantee becomes decorative. Equally, a
+   * human must not answer on an agent's behalf, because the asking agent would
+   * attribute the reply to the peer it addressed.
+   */
+  as?: 'human' | { peer: string },
 ): TetherRequest | null {
+  if (as !== undefined) {
+    const target = store.getRequest(id);
+    if (!target) return null;
+    const wantsHuman = target.toPeer === '';
+    if (wantsHuman !== (as === 'human')) return null;
+    if (as !== 'human' && target.toPeer !== as.peer) return null;
+  }
+
   const req = store.resolveRequest(id, status, answer);
   if (!req) return null;
 

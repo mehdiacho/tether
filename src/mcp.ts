@@ -14,6 +14,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { config } from './config.ts';
+import * as peers from './peers.ts';
 import * as requests from './requests.ts';
 import * as scheduler from './scheduler.ts';
 import { placeCall } from './calls.ts';
@@ -85,7 +86,14 @@ function result(r: TetherRequest | null, id: string) {
   };
 }
 
-export function buildMcpServer(agentName: string): McpServer {
+/**
+ * @param agentName Display label for the human's notifications.
+ * @param self      This caller's authenticated peer name, or '' for a legacy
+ *                  agent token that maps to no peer. A caller with no name has
+ *                  no inbox and cannot be addressed, so the peer tools refuse
+ *                  it rather than inventing an identity for it.
+ */
+export function buildMcpServer(agentName: string, self = ''): McpServer {
   const server = new McpServer(
     { name: 'tether', version: '0.1.0' },
     {
@@ -97,7 +105,14 @@ export function buildMcpServer(agentName: string): McpServer {
         'guessing wrong is high. Before starting long unattended work, expect to use these. ' +
         '`call` speaks a message at maximum priority and keeps the recording — for things that ' +
         'must not be missed. `schedule_create` sets up a recurring reminder that fires with no ' +
-        'agent running, which is the right tool when they ask to be reminded of something daily.',
+        'agent running, which is the right tool when they ask to be reminded of something daily.' +
+        (self
+          ? ` You are the peer "${self}". Other agents can reach you here: use \`peer_list\` to ` +
+            'see who is addressable, `peer_ask` to ask one of them a question and block on the ' +
+            'answer, `peer_send` to tell them something without waiting, and `inbox_wait` to ' +
+            'park until somebody addresses you. When `inbox_wait` returns a question, answer it ' +
+            'with `reply`, or the asker sits blocked until it times out.'
+          : ''),
     },
   );
 
@@ -132,6 +147,7 @@ export function buildMcpServer(agentName: string): McpServer {
         context: ctx ?? null,
         audioId,
         agentName,
+        fromPeer: self,
         timeoutSec: 60,
       });
       return {
@@ -184,6 +200,7 @@ export function buildMcpServer(agentName: string): McpServer {
         priority: p,
         context: ctx ?? null,
         agentName,
+        fromPeer: self,
         timeoutSec: timeout_sec,
       });
       return result(await awaitResolution(req.id), req.id);
@@ -225,6 +242,7 @@ export function buildMcpServer(agentName: string): McpServer {
         priority: p,
         context: ctx ?? null,
         agentName,
+        fromPeer: self,
         timeoutSec: timeout_sec,
       });
       return result(await awaitResolution(req.id), req.id);
@@ -298,6 +316,7 @@ export function buildMcpServer(agentName: string): McpServer {
           body: text,
           priority: p,
           agentName,
+          fromPeer: self,
           audioId,
           timeoutSec: 60,
         });
@@ -574,6 +593,276 @@ export function buildMcpServer(agentName: string): McpServer {
         },
       ],
     }),
+  );
+
+  /* ------------------------------------------------- agent to agent -- */
+
+  /**
+   * Why these exist at all.
+   *
+   * Two agents on different platforms cannot poke each other: neither Claude
+   * Code nor Codex exposes an API for injecting a message into a running
+   * session, and a named pipe keyed to a PID does not cross a machine boundary.
+   * But both are MCP *clients*, so both call outward — and if both call outward
+   * to the same place, that place is a rendezvous and no relay is needed.
+   *
+   * The initiator blocks in `peer_ask`. The responder blocks in `inbox_wait`.
+   * Tether holds the question in SQLite in between, so neither has to be
+   * running when the other speaks.
+   */
+
+  /** Refuse politely when a legacy token with no peer row calls a peer tool. */
+  function needsIdentity() {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text:
+            'This token is not registered as a peer, so it has no address and cannot send or ' +
+            'receive agent-to-agent messages. Register one on the server with: ' +
+            'docker exec -it tether node src/cli/peer.ts add <name>',
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  server.registerTool(
+    'peer_list',
+    {
+      title: 'List peers',
+      description:
+        'Who else is addressable through Tether — other agents, and the human. Call this ' +
+        'before addressing someone you have not talked to, rather than guessing a name.',
+      inputSchema: {},
+    },
+    async () => {
+      if (!self) return needsIdentity();
+      const all = peers.list();
+      if (all.length === 0) return text_('No peers are registered yet.');
+      const lines = all.map((p) => {
+        const who = p.name === self ? ' (you)' : '';
+        const tool = p.tool ? ` [${p.tool}]` : '';
+        const desc = p.description ? ` — ${p.description}` : '';
+        return `${p.name}${who}  ${p.kind}${tool}${desc}`;
+      });
+      return text_(lines.join('\n'));
+    },
+  );
+
+  server.registerTool(
+    'peer_send',
+    {
+      title: 'Tell a peer something',
+      description:
+        'Send another agent a message without waiting for a reply. Use for handoffs and ' +
+        'status — "I have pushed the branch", "the schema changed". If you need an answer ' +
+        'before you can continue, use `peer_ask` instead; a send they never read looks ' +
+        'identical to a send they disagreed with.',
+      inputSchema: {
+        to: z.string().describe('Peer name, from `peer_list`.'),
+        title: z.string().max(120).describe('Short headline.'),
+        body: z.string().max(4000).describe('The detail. Include what they need to act, not a summary of your session.'),
+        context,
+      },
+    },
+    async ({ to, title, body, context: ctx }) => {
+      if (!self) return needsIdentity();
+      const target = peers.resolveTarget(to);
+      if ('error' in target) return { content: [{ type: 'text' as const, text: target.error }], isError: true };
+      if (target.peer.kind === 'human') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `"${target.peer.name}" is the human. Use \`notify\` or \`ask\` — those reach a phone; this does not.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const req = requests.create({
+        kind: 'notify',
+        title,
+        body,
+        context: ctx ?? null,
+        agentName,
+        fromPeer: self,
+        toPeer: target.peer.name,
+        // Long enough that a peer idle overnight still finds it, short enough
+        // that a stale handoff does not resurface a week later as news.
+        timeoutSec: 24 * 3600,
+      });
+      return text_(`Sent to ${target.peer.name}. id: ${req.id}`);
+    },
+  );
+
+  server.registerTool(
+    'peer_ask',
+    {
+      title: 'Ask a peer and wait',
+      description:
+        'Ask another agent a question and BLOCK until they answer. This is the tool that lets ' +
+        'two agents work together without the human relaying between them. They may be idle, ' +
+        'or not running at all — the question is durable, and this returns a request id, so an ' +
+        'interrupted call can pick the answer up later with `collect`.',
+      inputSchema: {
+        to: z.string().describe('Peer name, from `peer_list`.'),
+        title: z.string().max(120).describe('The question in one line.'),
+        body: z.string().max(4000).describe('Everything they need to answer without asking you for context back.'),
+        choices: z
+          .array(z.string())
+          .optional()
+          .describe('Constrain the answer to a set of options, when it genuinely is one.'),
+        context,
+        timeout_sec: z
+          .number()
+          .int()
+          .optional()
+          .describe('How long to wait before giving up. Default is the server default.'),
+      },
+    },
+    async ({ to, title, body, choices, context: ctx, timeout_sec }) => {
+      if (!self) return needsIdentity();
+      const target = peers.resolveTarget(to);
+      if ('error' in target) return { content: [{ type: 'text' as const, text: target.error }], isError: true };
+      if (target.peer.kind === 'human') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `"${target.peer.name}" is the human. Use \`ask\` — it reaches their phone and rings; this does not.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      if (target.peer.name === self) {
+        return {
+          content: [{ type: 'text' as const, text: 'You cannot ask yourself; that deadlocks.' }],
+          isError: true,
+        };
+      }
+
+      const req = requests.create({
+        kind: 'ask',
+        title,
+        body,
+        choices: choices ?? null,
+        context: ctx ?? null,
+        agentName,
+        fromPeer: self,
+        toPeer: target.peer.name,
+        timeoutSec: timeout_sec,
+      });
+      const settled = await awaitResolution(req.id);
+      return result(settled, req.id);
+    },
+  );
+
+  server.registerTool(
+    'inbox_wait',
+    {
+      title: 'Wait for another agent',
+      description:
+        'Park until another agent addresses you, then return what they said. This is how you ' +
+        'stay reachable while idle without burning tokens polling: call it when you have ' +
+        'finished your work and expect a peer to need you. Anything it returns that is a ' +
+        'question must be answered with `reply` — until you do, the asker is blocked.',
+      inputSchema: {
+        timeout_sec: z
+          .number()
+          .int()
+          .optional()
+          .describe('How long to park. Defaults to a few minutes; call again to keep waiting.'),
+      },
+    },
+    async ({ timeout_sec }) => {
+      if (!self) return needsIdentity();
+
+      const deadline = Date.now() + Math.min(Math.max(timeout_sec ?? 300, 5), 3600) * 1000;
+
+      for (;;) {
+        // Read from the cursor, not from "everything pending". Without the
+        // cursor a doorbell would hand back the same message on every turn,
+        // and an agent woken by a hook would answer it forever.
+        const cursor = peers.cursorFor(self);
+        const batch = peers.inbox(self, cursor);
+
+        if (batch.length > 0) {
+          peers.advance(self, batch[batch.length - 1]!.seq);
+          const lines = batch.map((m) => {
+            const needs =
+              m.kind === 'ask'
+                ? `\n  -> answer with: reply(request_id="${m.id}", answer=...)`
+                : '';
+            const opts = m.choices?.length ? `\n  options: ${m.choices.join(' | ')}` : '';
+            const ctx = m.context ? `\n  context: ${JSON.stringify(m.context)}` : '';
+            return `from ${m.fromPeer || 'unknown'} — ${m.title}\n  ${m.body}${opts}${ctx}${needs}`;
+          });
+          return text_(lines.join('\n\n'));
+        }
+
+        if (Date.now() >= deadline) {
+          return text_('Nothing addressed to you. Call inbox_wait again to keep waiting.');
+        }
+
+        await new Promise((r) => {
+          const t = setTimeout(r, Math.min(POLL_LEG_MS, deadline - Date.now()));
+          t.unref?.();
+        });
+      }
+    },
+  );
+
+  server.registerTool(
+    'reply',
+    {
+      title: 'Answer a peer',
+      description:
+        'Answer a question another agent asked you, by the request id `inbox_wait` gave you. ' +
+        'Until this lands, the asking agent is still blocked. If you cannot or will not answer, ' +
+        'set refused — "no" and "never saw it" mean different things to the agent waiting.',
+      inputSchema: {
+        request_id: z.string(),
+        answer: z.string().max(4000).default('').describe('Your answer, in their terms.'),
+        refused: z
+          .boolean()
+          .default(false)
+          .describe('Decline rather than answer. Put the reason in `answer`.'),
+      },
+    },
+    async ({ request_id, answer, refused }) => {
+      if (!self) return needsIdentity();
+
+      const r = requests.resolve(
+        request_id,
+        refused ? 'refused' : 'answered',
+        refused ? answer || null : answer,
+        { peer: self },
+      );
+      if (!r) {
+        const current = requests.get(request_id);
+        if (!current) return text_(`No request ${request_id}.`);
+        if (current.toPeer !== self) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                // Naming the real addressee is safe here — the caller is an
+                // authenticated peer, and a silent failure would leave the
+                // actual addressee's question looking answered.
+                text: `That question was addressed to "${current.toPeer || 'the human'}", not to you.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        return text_(`Already ${current.status}.`);
+      }
+      return text_(`Replied to ${r.fromPeer || 'the asker'}.`);
+    },
   );
 
   return server;

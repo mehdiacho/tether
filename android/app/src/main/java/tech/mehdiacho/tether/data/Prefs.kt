@@ -43,17 +43,28 @@ class Prefs(context: Context) {
      * Reading migrates a pre-0.2 install, which stored one address under a
      * different key. Doing it on read rather than in an init block means an
      * upgrade needs no migration step and cannot half-run.
+     *
+     * **Every branch normalises.** 0.2.0 shipped with the legacy branch
+     * returning the stored value untouched, and a pre-0.2 install had stored a
+     * bare `192.168.0.2:8790`. OkHttp does not fail that softly — `url()`
+     * *throws* `IllegalArgumentException: Invalid URL port` while the request is
+     * still being built, outside the runCatching around the call, so it came out
+     * as an uncaught crash on the first refresh after launch rather than a
+     * failed Result. The app crash-looped for two days. Normalising on write
+     * only is not enough: the read is where an old value arrives.
      */
     var addresses: List<String>
         get() {
             val raw = sp.getString(KEY_ADDRESSES, null)
             if (raw.isNullOrBlank()) {
-                val legacy = sp.getString(KEY_SERVER, "")?.trimEnd('/').orEmpty()
+                val legacy = normalize(sp.getString(KEY_SERVER, "").orEmpty())
                 return if (legacy.isBlank()) emptyList() else listOf(legacy)
             }
             return runCatching {
                 val arr = JSONArray(raw)
-                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf(String::isNotBlank) }
+                (0 until arr.length()).mapNotNull {
+                    normalize(arr.optString(it)).takeIf(String::isNotBlank)
+                }
             }.getOrDefault(emptyList())
         }
         set(value) {

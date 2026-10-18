@@ -27,6 +27,8 @@ import { getAudio, getByActionToken, putAudio } from './db.ts';
 import { configuredChannels } from './channels.ts';
 import * as callsession from './callsession.ts';
 import * as devices from './devices.ts';
+import * as peers from './peers.ts';
+import * as oauth from './oauth.ts';
 import { pushEnabled } from './push.ts';
 import * as scheduler from './scheduler.ts';
 import * as sessions from './sessions.ts';
@@ -54,6 +56,22 @@ function bearer(req: Request): string | null {
   if (h?.startsWith('Bearer ')) return h.slice(7).trim();
   const q = req.query['token'];
   return typeof q === 'string' ? q : null;
+}
+
+/** The origin this request was addressed to, as the OAuth issuer sees it. */
+function issuer(req: Request): string {
+  return oauth.issuerFor({ host: req.header('host'), proto: req.header('x-forwarded-proto') ?? req.protocol });
+}
+
+/**
+ * Who an agent-side request is from: a peer or legacy token, or (with OAuth on)
+ * an access token issued to a connector.
+ */
+function identify(token: string | null): peers.Identity | null {
+  const id = peers.authenticate(token);
+  if (id || !token || !oauth.enabled()) return id;
+  const peer = oauth.authenticate(token);
+  return peer ? { kind: 'peer', peer } : null;
 }
 
 function requireToken(allowed: Set<string>, label: string) {
@@ -160,15 +178,125 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     });
   });
 
+  /* --------------------------------------------------------------- OAuth -- */
+
+  if (oauth.enabled()) {
+    const oauthError = (res: Response, err: unknown): void => {
+      if (err instanceof oauth.OAuthError) {
+        res.status(err.status).json({ error: err.code, error_description: err.message });
+        return;
+      }
+      console.error('[tether] OAuth request failed:', err);
+      res.status(500).json({ error: 'server_error' });
+    };
+
+    // The resource metadata is also served under the resource's own path, which
+    // is where a client looks first per RFC 9728 §3.1.
+    for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+      app.get(path, (req, res) => res.json(oauth.resourceMetadata(issuer(req))));
+    }
+    app.get('/.well-known/oauth-authorization-server', (req, res) =>
+      res.json(oauth.serverMetadata(issuer(req))),
+    );
+
+    app.post('/oauth/register', (req, res) => {
+      try {
+        res.status(201).json(oauth.register(req.body));
+      } catch (err) {
+        oauthError(res, err);
+      }
+    });
+
+    app.get('/oauth/authorize', (req, res) => {
+      try {
+        const q = req.query as Record<string, string | undefined>;
+        const { pendingId, clientName } = oauth.startAuthorization(q, issuer(req));
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('X-Frame-Options', 'DENY');
+        res.type('html').send(oauth.consentPage(pendingId, clientName));
+      } catch (err) {
+        if (err instanceof oauth.OAuthError) {
+          res.status(err.status).type('text').send(`Tether could not start this connection: ${err.message}`);
+          return;
+        }
+        oauthError(res, err);
+      }
+    });
+
+    app.get('/oauth/authorize/:id/status', (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(oauth.consentStatus(param(req, 'id')));
+    });
+
+    app.post('/oauth/authorize/:id', express.urlencoded({ extended: false }), (req, res) => {
+      const token = typeof req.body?.client_token === 'string' ? req.body.client_token : '';
+      const id = param(req, 'id');
+      if (!oauth.approveWithClientToken(id, token, devices.isClientToken)) {
+        res.status(401).type('text').send('That is not a client token for this server.');
+        return;
+      }
+      const s = oauth.consentStatus(id);
+      if (s.state === 'done') res.redirect(302, s.redirect);
+      else res.status(410).type('text').send('This request expired. Start the connection again.');
+    });
+
+    app.post('/oauth/token', express.urlencoded({ extended: false }), (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        res.json(oauth.token((req.body ?? {}) as Record<string, unknown>));
+      } catch (err) {
+        oauthError(res, err);
+      }
+    });
+  }
+
   /* ----------------------------------------------------------------- MCP -- */
 
-  const requireAgent = requireToken(config.agentTokens, 'agent');
+  /**
+   * Agent auth for the plain REST routes (the session registry, which hooks
+   * post to). Accepts a peer token as well as a legacy AGENT_TOKENS entry, so
+   * an agent that has been given a peer identity does not need to keep the old
+   * one around just to register itself.
+   */
+  const requireAgent = (req: Request, res: Response, next: NextFunction): void => {
+    if (!identify(bearer(req))) {
+      res.status(401).json({ error: 'A valid agent token is required.' });
+      return;
+    }
+    next();
+  };
 
-  app.all('/mcp', requireAgent, async (req: Request, res: Response) => {
+  app.all('/mcp', async (req: Request, res: Response) => {
+    /**
+     * Identity comes from the token, not from a header.
+     *
+     * `X-Agent-Name` used to decide who the caller was. That was fine while the
+     * only audience was a human reading a notification — a wrong label is a
+     * cosmetic bug. It stops being fine the moment agents can address each
+     * other, because a label anyone can set is a label anyone can forge. So the
+     * token now decides, and the header survives only as a display hint for
+     * legacy tokens that map to no peer.
+     */
+    const identity = identify(bearer(req));
+    if (!identity) {
+      // RFC 9728: point an OAuth-capable client (claude.ai) at the metadata
+      // that tells it how to get a token.
+      if (oauth.enabled()) {
+        res.setHeader(
+          'WWW-Authenticate',
+          `Bearer resource_metadata="${issuer(req)}/.well-known/oauth-protected-resource"`,
+        );
+      }
+      res.status(401).json({ error: 'A valid agent or peer token is required.' });
+      return;
+    }
+    const self = peers.addressOf(identity);
+    const agentName =
+      identity.kind === 'peer' ? identity.peer.name : req.header('x-agent-name') || 'agent';
+
     // Stateless transport: a fresh server per request. Blocking tool calls are
     // held open by the HTTP request itself, and durability lives in SQLite, so
     // there is no in-memory session to lose on restart.
-    const agentName = req.header('x-agent-name') || 'agent';
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -178,7 +306,7 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     });
 
     try {
-      const server = buildMcpServer(agentName);
+      const server = buildMcpServer(agentName, self);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
@@ -226,10 +354,23 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     const { answer, refused } = req.body as { answer?: string; refused?: boolean };
     const status = refused ? 'refused' : 'answered';
 
-    const r = requests.resolve(param(req, 'id'), status, refused ? null : (answer ?? ''));
+    // 'human': this surface can only ever answer what was addressed to the
+    // human. A question one agent asked another belongs to that agent, and
+    // answering it here would make the asker attribute a human's words to a peer.
+    const r = requests.resolve(
+      param(req, 'id'),
+      status,
+      refused ? null : (answer ?? ''),
+      'human',
+    );
     if (!r) {
+      const current = requests.get(param(req, 'id'));
+      if (current && !requests.isForHuman(current)) {
+        res.status(403).json({ error: `addressed to peer "${current.toPeer}", not to you` });
+        return;
+      }
       // Not an error worth alarming a phone client over — someone else answered.
-      res.status(409).json({ error: 'already resolved', request: requests.get(param(req, 'id')) });
+      res.status(409).json({ error: 'already resolved', request: current });
       return;
     }
     res.json(r);
@@ -253,7 +394,12 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
     const refused = req.query['refused'] === '1';
     const answer = typeof req.query['answer'] === 'string' ? req.query['answer'] : '';
 
-    const r = requests.resolve(id, refused ? 'refused' : 'answered', refused ? null : answer);
+    const r = requests.resolve(
+      id,
+      refused ? 'refused' : 'answered',
+      refused ? null : answer,
+      'human',
+    );
     res
       .status(r ? 200 : 409)
       .type('text/plain')
@@ -701,6 +847,9 @@ export function createApp(): { app: express.Express; attach: (s: Server) => void
   };
 
   requests.onChange((kind, request) => {
+    // Same reasoning as the push fan-out: the request feed is the human's view,
+    // and an agent asking another agent has no business on it.
+    if (!requests.isForHuman(request)) return;
     broadcast(
       kind === 'created'
         ? { type: 'request.created', request }

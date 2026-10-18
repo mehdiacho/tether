@@ -17,6 +17,8 @@ import type {
   CallTurn,
   Device,
   MessageDelivery,
+  Peer,
+  PeerKind,
   SessionKind,
   SessionMessage,
   SessionRole,
@@ -50,6 +52,10 @@ db.exec(`
     audio_id    TEXT,
     action_token TEXT NOT NULL DEFAULT '',
     agent_name  TEXT NOT NULL DEFAULT 'agent',
+    -- Authenticated sender and addressee. An empty to_peer means the human,
+    -- which is what every request predating agent-to-agent was.
+    from_peer   TEXT NOT NULL DEFAULT '',
+    to_peer     TEXT NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     expires_at  INTEGER NOT NULL,
     resolved_at INTEGER
@@ -57,6 +63,45 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_requests_status  ON requests(status);
   CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_requests_inbox   ON requests(to_peer, status);
+
+  -- Who may address whom.
+  --
+  -- A peer's identity comes from its TOKEN, never from a header it sends. The
+  -- old X-Agent-Name was a display label that any client could set to any
+  -- value; once agents can address each other, a self-asserted name is a
+  -- spoofing primitive, so it stops being identity here.
+  --
+  -- The human peer deliberately has no token: nothing may authenticate AS the
+  -- human. See PeerKind in types.ts for why that asymmetry is load-bearing.
+  CREATE TABLE IF NOT EXISTS peers (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    kind         TEXT NOT NULL DEFAULT 'agent',
+    tool         TEXT NOT NULL DEFAULT '',
+    token        TEXT UNIQUE,
+    description  TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    revoked      INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_peers_token ON peers(token);
+
+  -- How far through its inbox each peer has read.
+  --
+  -- Day-one requirement, not an optimisation. Without it every doorbell poll
+  -- re-delivers the same message, and an agent woken by a hook would answer the
+  -- same question on every turn forever. The cursor is a rowid watermark
+  -- because rowids are monotonic per insert; created_at is not unique enough,
+  -- two requests can land in the same millisecond.
+  CREATE TABLE IF NOT EXISTS peer_cursors (
+    peer       TEXT NOT NULL,
+    stream     TEXT NOT NULL DEFAULT 'inbox',
+    last_seq   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (peer, stream)
+  );
 
   -- Audio blobs for voice messages. Kept out of the requests row so a large
   -- MP3 never bloats a hot query.
@@ -224,6 +269,16 @@ db.exec(`
   if (!pairCols.some((c) => c.name === 'claimed_by')) {
     db.exec(`ALTER TABLE pairing_codes ADD COLUMN claimed_by TEXT`);
   }
+
+  // Agent-to-agent addressing. Defaulting to_peer to '' is what keeps every
+  // existing row meaning "asked the human" without a data migration.
+  if (!cols.some((c) => c.name === 'from_peer')) {
+    db.exec(`ALTER TABLE requests ADD COLUMN from_peer TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols.some((c) => c.name === 'to_peer')) {
+    db.exec(`ALTER TABLE requests ADD COLUMN to_peer TEXT NOT NULL DEFAULT ''`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_requests_inbox ON requests(to_peer, status)`);
+  }
 }
 
 /** SQLite gives us plain objects; map them into the shape the app uses. */
@@ -240,10 +295,22 @@ type Row = {
   audio_id: string | null;
   action_token: string;
   agent_name: string;
+  from_peer: string;
+  to_peer: string;
+  seq: number;
   created_at: number;
   expires_at: number;
   resolved_at: number | null;
 };
+
+/**
+ * Every request SELECT goes through this.
+ *
+ * `rowid AS seq` is the inbox cursor. SQLite hands it out monotonically per
+ * insert, so "everything after seq N" is exact — which a created_at watermark
+ * is not, since two requests can share a millisecond.
+ */
+const REQ_COLS = `rowid AS seq, *`;
 
 function parseJson<T>(raw: string | null): T | null {
   if (!raw) return null;
@@ -268,6 +335,9 @@ export function rowToRequest(r: Row): TetherRequest {
     audioId: r.audio_id,
     actionToken: r.action_token,
     agentName: r.agent_name,
+    fromPeer: r.from_peer ?? '',
+    toPeer: r.to_peer ?? '',
+    seq: r.seq,
     createdAt: r.created_at,
     expiresAt: r.expires_at,
     resolvedAt: r.resolved_at,
@@ -277,14 +347,20 @@ export function rowToRequest(r: Row): TetherRequest {
 const stmts = {
   insert: db.prepare(`
     INSERT INTO requests
-      (id, kind, title, body, choices, context, priority, status, audio_id, action_token, agent_name, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+      (id, kind, title, body, choices, context, priority, status, audio_id, action_token, agent_name, from_peer, to_peer, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
   `),
-  byId: db.prepare(`SELECT * FROM requests WHERE id = ?`),
+  byId: db.prepare(`SELECT ${REQ_COLS} FROM requests WHERE id = ?`),
+  // The human's pending list. Scoped to to_peer = '' so agent-to-agent traffic
+  // never reaches the phone: an agent asking another agent a question is not a
+  // notification, and fanning it out would make Tether ring all day.
   pending: db.prepare(`
-    SELECT * FROM requests WHERE status = 'pending' ORDER BY created_at DESC
+    SELECT ${REQ_COLS} FROM requests
+     WHERE status = 'pending' AND to_peer = '' ORDER BY created_at DESC
   `),
-  recent: db.prepare(`SELECT * FROM requests ORDER BY created_at DESC LIMIT ?`),
+  recent: db.prepare(
+    `SELECT ${REQ_COLS} FROM requests WHERE to_peer = '' ORDER BY created_at DESC LIMIT ?`,
+  ),
   resolve: db.prepare(`
     UPDATE requests SET status = ?, answer = ?, resolved_at = ?
     WHERE id = ? AND status = 'pending'
@@ -296,7 +372,15 @@ const stmts = {
   dueIds: db.prepare(`
     SELECT id FROM requests WHERE status = 'pending' AND expires_at <= ?
   `),
-  byActionToken: db.prepare(`SELECT * FROM requests WHERE id = ? AND action_token = ?`),
+  byActionToken: db.prepare(
+    `SELECT ${REQ_COLS} FROM requests WHERE id = ? AND action_token = ?`,
+  ),
+  // One peer's unread inbox: addressed to it, still pending, after its cursor.
+  inboxAfter: db.prepare(`
+    SELECT ${REQ_COLS} FROM requests
+     WHERE to_peer = ? AND status = 'pending' AND rowid > ?
+     ORDER BY rowid ASC LIMIT ?
+  `),
   putAudio: db.prepare(
     `INSERT INTO audio (id, mime, bytes, keep, created_at) VALUES (?, ?, ?, ?, ?)`,
   ),
@@ -329,6 +413,9 @@ export interface InsertArgs {
   audioId: string | null;
   actionToken: string;
   agentName: string;
+  fromPeer: string;
+  /** Empty addresses the human. */
+  toPeer: string;
   createdAt: number;
   expiresAt: number;
 }
@@ -345,6 +432,8 @@ export function insertRequest(a: InsertArgs): TetherRequest {
     a.audioId,
     a.actionToken,
     a.agentName,
+    a.fromPeer,
+    a.toPeer,
     a.createdAt,
     a.expiresAt,
   );
@@ -415,6 +504,114 @@ export function getByActionToken(id: string, token: string): TetherRequest | nul
   if (!token) return null;
   const row = stmts.byActionToken.get(id, token) as Row | undefined;
   return row ? rowToRequest(row) : null;
+}
+
+/**
+ * A peer's unread, still-pending inbox, oldest first.
+ *
+ * Only pending rows: a question someone else already answered, or that timed
+ * out, is not work. The cursor still has to advance past it, which is why
+ * `advanceCursor` takes the high-water seq the caller actually saw rather than
+ * counting rows.
+ */
+export function inboxAfter(peer: string, afterSeq: number, limit = 20): TetherRequest[] {
+  return (stmts.inboxAfter.all(peer, afterSeq, limit) as Row[]).map(rowToRequest);
+}
+
+/* ------------------------------------------------------------------ peers -- */
+
+type PeerRow = {
+  id: string;
+  name: string;
+  kind: string;
+  tool: string;
+  token: string | null;
+  description: string;
+  created_at: number;
+  last_seen_at: number;
+  revoked: number;
+};
+
+function rowToPeer(r: PeerRow): Peer {
+  return {
+    id: r.id,
+    name: r.name,
+    kind: r.kind as PeerKind,
+    tool: r.tool,
+    description: r.description,
+    createdAt: r.created_at,
+    lastSeenAt: r.last_seen_at,
+    revoked: r.revoked === 1,
+  };
+}
+
+const peerStmts = {
+  insert: db.prepare(`
+    INSERT INTO peers (id, name, kind, tool, token, description, created_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  byName: db.prepare(`SELECT * FROM peers WHERE name = ?`),
+  byToken: db.prepare(`SELECT * FROM peers WHERE token = ? AND revoked = 0`),
+  all: db.prepare(`SELECT * FROM peers WHERE revoked = 0 ORDER BY kind, name`),
+  touch: db.prepare(`UPDATE peers SET last_seen_at = ? WHERE id = ?`),
+  revoke: db.prepare(`UPDATE peers SET revoked = 1, token = NULL WHERE name = ?`),
+  cursorGet: db.prepare(`SELECT last_seq FROM peer_cursors WHERE peer = ? AND stream = ?`),
+  // Guarded with MAX so an out-of-order or replayed advance can never rewind a
+  // cursor and re-deliver work the peer already handled.
+  cursorSet: db.prepare(`
+    INSERT INTO peer_cursors (peer, stream, last_seq, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(peer, stream) DO UPDATE
+      SET last_seq = MAX(last_seq, excluded.last_seq), updated_at = excluded.updated_at
+  `),
+};
+
+export interface InsertPeerArgs {
+  id: string;
+  name: string;
+  kind: PeerKind;
+  tool: string;
+  /** Null for a human peer — nothing may authenticate as the human. */
+  token: string | null;
+  description: string;
+}
+
+export function insertPeer(a: InsertPeerArgs): Peer {
+  const now = Date.now();
+  peerStmts.insert.run(a.id, a.name, a.kind, a.tool, a.token, a.description, now, now);
+  return getPeer(a.name)!;
+}
+
+export function getPeer(name: string): Peer | null {
+  const r = peerStmts.byName.get(name) as PeerRow | undefined;
+  return r ? rowToPeer(r) : null;
+}
+
+/** Identity, derived from the credential rather than asserted by the caller. */
+export function getPeerByToken(token: string): Peer | null {
+  if (!token) return null;
+  const r = peerStmts.byToken.get(token) as PeerRow | undefined;
+  return r ? rowToPeer(r) : null;
+}
+
+export function listPeers(): Peer[] {
+  return (peerStmts.all.all() as PeerRow[]).map(rowToPeer);
+}
+
+export function touchPeer(id: string): void {
+  peerStmts.touch.run(Date.now(), id);
+}
+
+export function revokePeer(name: string): boolean {
+  return peerStmts.revoke.run(name).changes > 0;
+}
+
+export function getCursor(peer: string, stream = 'inbox'): number {
+  const r = peerStmts.cursorGet.get(peer, stream) as { last_seq: number } | undefined;
+  return r?.last_seq ?? 0;
+}
+
+export function advanceCursor(peer: string, seq: number, stream = 'inbox'): void {
+  peerStmts.cursorSet.run(peer, stream, seq, Date.now());
 }
 
 /* -------------------------------------------------------------- schedules -- */
