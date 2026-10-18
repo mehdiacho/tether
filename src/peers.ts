@@ -85,6 +85,24 @@ export function register(a: RegisterArgs): { peer: Peer; token: string | null } 
 }
 
 /**
+ * Create an agent peer with no static token, for an identity whose credentials
+ * live elsewhere (OAuth access tokens, see oauth.ts).
+ */
+export function registerTokenless(a: RegisterArgs): Peer {
+  const name = normalizeName(a.name);
+  if (!validName(name)) throw new Error(`"${a.name}" is not a usable peer name.`);
+  if (store.getPeer(name)) throw new Error(`Peer "${name}" already exists.`);
+  return store.insertPeer({
+    id: randomUUID(),
+    name,
+    kind: 'agent',
+    tool: a.tool ?? '',
+    token: null,
+    description: a.description ?? '',
+  });
+}
+
+/**
  * Resolve a bearer token to a peer.
  *
  * Falls back to the legacy `AGENT_TOKENS` set, which predates peers: those
