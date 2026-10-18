@@ -63,7 +63,6 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_requests_status  ON requests(status);
   CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_requests_inbox   ON requests(to_peer, status);
 
   -- Who may address whom.
   --
@@ -277,8 +276,11 @@ db.exec(`
   }
   if (!cols.some((c) => c.name === 'to_peer')) {
     db.exec(`ALTER TABLE requests ADD COLUMN to_peer TEXT NOT NULL DEFAULT ''`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_requests_inbox ON requests(to_peer, status)`);
   }
+  // Created here, not in the schema above: on a pre-a2a database the CREATE
+  // TABLE is a no-op, so an index on to_peer there runs before the column
+  // exists and the server refuses to start.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_requests_inbox ON requests(to_peer, status)`);
 }
 
 /** SQLite gives us plain objects; map them into the shape the app uses. */
